@@ -16,7 +16,7 @@ Works straight from Hydro.fsd. Subcommands:
             groups). Run on a world _split directory.
   params    Dump P* boat physics parameter records to readable text.
   all       everything in one shot: extract, textures, world split (with
-            _textures/ and _screens/), models, and params.
+            _textures/ and _screens/), models, tracks, and params.
 
 Every command takes -o/--outdir to choose the output directory. Defaults:
   extract/all -> <archive>_out/         world  -> <worldfile>_split/
@@ -29,8 +29,8 @@ Examples (a full run from scratch):
   python3 hydrotool.py params out/bc0abcfa.bin_split
 
 Notes:
-  * The single 640x480 title EGF (id 1720011c) is stored tiled and comes out
-    scrambled; every other EGF is fine.
+  * EGFs wider than 256 (the 640x480 loading screen) are stored as 256x256
+    tiles and are de-tiled automatically.
   * ERM files are per-track radar maps, not 3D models.
   * M* world records (terrain heightfield patches) are not decoded yet.
   * Format documentation lives in FSD_format.md alongside this script.
@@ -388,7 +388,9 @@ EXT = {b'ESF\x08': '.esf', b'EGF\x04': '.egf', b'ERM!': '.erm'}
 # ===========================================================================
 
 def egf_to_png(path, out=None):
-    """Convert one EGF file to PNG. Returns output path (or None)."""
+    """Convert one EGF file to PNG. Returns output path (or None).
+    Images wider than 256 are stored as row-major 256x256 tiles (Glide's
+    max texture size) and get de-tiled."""
     data = open(path, 'rb').read()
     if data[:4] != b'EGF\x04':
         return None
@@ -396,8 +398,22 @@ def egf_to_png(path, out=None):
     h = u >> 11
     w = (u & 0x7FF) >> 1
     fmt4444 = u & 1
-    stride = (len(data) - 8) // (h * 2)
-    px = array.array('H'); px.frombytes(data[8:8 + stride*h*2])
+    if w > 256 and len(data) - 8 == w*h*2:
+        px = array.array('H'); px.frombytes(data[8:])
+        lin = array.array('H', bytes(w*h*2))
+        pos = 0
+        for ty in range(0, h, 256):
+            th = min(256, h - ty)
+            for tx in range(0, w, 256):
+                tw = min(256, w - tx)
+                for y in range(th):
+                    lin[(ty+y)*w + tx:(ty+y)*w + tx + tw] = px[pos:pos+tw]
+                    pos += tw
+        px = lin
+        stride = w
+    else:
+        stride = (len(data) - 8) // (h * 2)
+        px = array.array('H'); px.frombytes(data[8:8 + stride*h*2])
     rgba = bytearray(stride*h*4)
     i = 0
     if fmt4444:
@@ -715,6 +731,7 @@ def cmd_all(args):
         print(f'world: {nrec} resources -> {splitdir}/ '
               f'({tok} T + {mok} M textures, {scr} screens, {tskip} skipped)')
         cmd_models(Namespace(splitdir=splitdir, outdir=None))
+        cmd_tracks(Namespace(splitdir=splitdir, outdir=None))
         cmd_params(Namespace(splitdir=splitdir, outdir=None))
     else:
         print('world container not found in archive (skipped)')
@@ -820,17 +837,10 @@ def h_nodes(d, texrefs):
 
 
 def cmd_tracks(args):
-    import json
     src = args.splitdir
     outdir = args.outdir or os.path.join(src, '_tracks')
     os.makedirs(outdir, exist_ok=True)
-    relocs = {}
-    try:
-        with open(os.path.join(src, 'relocs.json')) as f:
-            relocs = {k: {int(l): n for l, n in v.items()}
-                      for k, v in json.load(f).items()}
-    except (OSError, ValueError):
-        pass
+    relocs = load_relocs(src)
     nobj = nskip = nnodes = 0
     for f in sorted(glob.glob(os.path.join(src, 'H*.bin'))):
         d = open(f, 'rb').read()
@@ -1011,18 +1021,28 @@ def g_to_obj(d, out, texrefs=None):
     return len(verts), len(faces)
 
 
-def cmd_models(args):
+def load_relocs(splitdir):
+    """Load relocs.json, canonicalizing import names to the actual record
+    filenames (trailer imports are sometimes lowercase, records uppercase)."""
     import json
+    canon = {}
+    for f in glob.glob(os.path.join(splitdir, '*.bin')):
+        n = os.path.splitext(os.path.basename(f))[0]
+        canon[n.upper()] = n
+    try:
+        with open(os.path.join(splitdir, 'relocs.json')) as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return {k: {int(l): canon.get(n.upper(), n) for l, n in v.items()}
+            for k, v in raw.items()}
+
+
+def cmd_models(args):
     src = args.splitdir
     outdir = args.outdir or os.path.join(src, '_models')
     os.makedirs(outdir, exist_ok=True)
-    relocs = {}
-    try:
-        with open(os.path.join(src, 'relocs.json')) as f:
-            relocs = {k: {int(l): n for l, n in v.items()}
-                      for k, v in json.load(f).items()}
-    except (OSError, ValueError):
-        pass
+    relocs = load_relocs(src)
     nobj = nvert = nface = nskip = 0
     for f in sorted(glob.glob(os.path.join(src, 'G*.bin'))):
         d = open(f, 'rb').read()

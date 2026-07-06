@@ -2,8 +2,8 @@
 
 ## Done (all in `hydrotool.py`, pure stdlib)
 - **Container / decompression**: FSD format + EDL1 codec fully reversed, verified.
-- **Names**: 536/542 recovered from HYDRO.EXE (`names.json`). Files extract to real paths.
-- **Textures**: all EGF UI textures → PNG (1555/4444, flipped). Title screen (id 1720011c) is tiled → scrambled, documented.
+- **Names**: 537/542 recovered (`names.json`; +TEST.EGF via hash attack 2026-07-06). Files extract to real paths.
+- **Textures**: all EGF UI textures → PNG (1555/4444, flipped), including the tiled 640x480 loading screen (256x256 row-major tiles — de-tiled correctly since 2026-07-06).
 - **World container** (`bc0abcfa`, 104MB): split into 4,588 named resources + `index.csv`.
 - **World textures — SOLVED, all 1,496 → PNG**: `fmt` is the Glide `GrTextureFormat_t` enum (0=RGB332, 2=ALPHA_8, 3=I8, 4=AI44, 5=P_8 with embedded 256×ARGB8888 palette *first* then indices, 8=ARGB8332, 11=1555, 12=4444, 13=AI88, 14=AP88). Size formula `36+w·h·bpp(+1024 pal)` verified on every file. Greyscale 8bpp textures are alpha/intensity formats by design — **no palettes are missing**. The `T_XTESTBB*` series is the same test image in 7 formats (built-in validation).
 - **P\* resources = boat physics parameters** (NOT palettes): `name\0 + type + value` lists — MASS, BUOYANCY, DRAG_*, handling for all 13 boats × variants. `hydrotool.py params` dumps them to text. (Known quirk: declared size undercuts the last float; parse by count.)
@@ -61,8 +61,8 @@ Negative results from the sessions so far, so a fresh start doesn't waste effort
 - **Assuming a fixed vertex-section slot** (e.g. always offs[1]): the section *count varies per file* (a detail LOD had 8 sections, a coarser LOD had 2). Section identity is keyed by the 0x10-header count dwords, not a fixed index. Any parser must read those counts, not hardcode positions.
 - **`ERM!` as boat models**: they're per-track radar/minimap bitmaps (`radmap_A..Z`). There are no standalone 3D boat meshes in Hydro.fsd; geometry is inside the world container.
 
-## The 6 still-unnamed FSD files
-Not referenced by any literal path in the exe: five tiny EGFs (four 0x88, one 0x2008) and the world container `bc0abcfa`. Cosmetic — everything meaningful is named.
+## The 5 still-unnamed FSD files
+Four tiny 8x8 EGFs and the world container `bc0abcfa`. Not referenced by any literal exe string; dictionary attacks failed. Cosmetic.
 
 ## ~~Loose texture thread~~ — CLOSED (2026-07-02)
 The "missing palette" theory was wrong twice over: `P*` files are boat *physics parameter* lists (see FSD_format.md), and the greyscale 8bpp textures are Glide ALPHA_8/INTENSITY_8/AI_44 formats that have no palette by design (`TBB*SH00` are 8×8 boat shadows, not skins). fmt-5 files are self-contained P_8 textures with the palette embedded before the pixels — including the 32-frame animated water palettes per track. All 1,496 T* textures now decode; nothing is left greyscale that shouldn't be.

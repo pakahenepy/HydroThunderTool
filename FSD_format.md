@@ -65,7 +65,7 @@ Every asset begins `4CC type + u32 info`, data at +8.
 
 **ESF** (`"ESF\x08"`) — mono ADPCM sound, stored raw. info low 24 bits = decoded PCM byte count (= (filesize−8)×4), top byte flags (0x90/0xD0). 4-bit IMA-style ADPCM (decoder in RazorBack's `Decode_Asset`).
 
-**EGF** (`"EGF\x04"`) — 16bpp texture. info: bits 11..31 = height, bits 1..10 = width (NPOT widths padded — stride = payload/(h·2)), bit 0 = format: **0 = ARGB1555 (bit15 = 1-bit alpha), 1 = ARGB4444**. Pixels row-major at +8. Converter: `egf2png.py`. Exception: the single 640x480 image (id `1720011c`, attract/title) is stored as 256-wide tiled segments rather than linear rows and renders scrambled; all other EGFs are <=256 wide and render correctly.
+**EGF** (`"EGF\x04"`) — 16bpp texture. info: bits 11..31 = height, bits 1..10 = width (NPOT widths padded — stride = payload/(h·2)), bit 0 = format: **0 = ARGB1555 (bit15 = 1-bit alpha), 1 = ARGB4444**. Pixels row-major at +8. Converter: `egf2png.py`. EGFs wider than 256 (the single 640x480 `loading.egf`) are stored as row-major 256x256 tiles (Glide's max texture size); `egf_to_png` de-tiles them. Decoded 2026-07-06 — renders perfectly.
 
 **ERM** (`"ERM!"`) — model (13 files = the 13 boats, ids sequential). Header u32s look like counts (e.g. 0x2A0/0x1F0/0x99) followed by zeroed tables and u16 index lists. Internal structure not yet mapped.
 
@@ -73,7 +73,7 @@ Every asset begins `4CC type + u32 info`, data at +8.
 
 ## Filename recovery from HYDRO.EXE
 
-The exe embeds literal asset paths (`h:\data\textures\*.egf`, `h:\data\radar\radmap_%c.erm`, `h:\sound\%d.esf`, `h:\wavmusic\track%02d.esf`). Mining these + the numeric/`%c` templates recovers **536/542** names. `names.json` (id→path) ships alongside; `fsd_extract.py` loads it automatically and lays files out under their real `data/...` tree. The 6 leftovers are five tiny EGFs (four 0x88, one 0x2008) and the world container `bc0abcfa`, none referenced by a literal string.
+The exe embeds literal asset paths (`h:\data\textures\*.egf`, `h:\data\radar\radmap_%c.erm`, `h:\sound\%d.esf`, `h:\wavmusic\track%02d.esf`). Mining these + the numeric/`%c` templates + a hash dictionary attack recovers **537/542** names (`e2c5a941` = `H:\DATA\TEXTURES\TEST.EGF`). `names.json` (id→path) ships alongside; `fsd_extract.py` loads it automatically and lays files out under their real `data/...` tree. The 5 leftovers are four tiny 8x8 EGFs (0x88 bytes) and the world container `bc0abcfa`, none referenced by a literal string (dictionary attacks over all exe strings x path patterns found nothing — cosmetic).
 
 The EGF loader in the exe (at .text 0x46e94a) confirms the texture header decode exactly: `height = info >> 11`, `width = (info >> 1) & 0x3ff`, `format = info & 1`, buffer = `w*h*2`.
 
