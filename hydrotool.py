@@ -9,13 +9,14 @@ Works straight from Hydro.fsd. Subcommands:
             Names come from an optional names.json (mine of HYDRO.EXE) merged
             with built-in pattern cracking; 536/542 files get real paths.
   textures  Decode EGF UI textures to PNG (ARGB1555 / ARGB4444, flipped).
-  world     Split the 104MB world container into its ~4588 named resources,
-            decode all T* textures to PNG (fmt = Glide GrTextureFormat_t)
-            and all B* loading screens.
+  world     Split the 104MB world container into its ~4588 named resources
+            and decode all T* textures (fmt = Glide GrTextureFormat_t) and
+            B* loading screens to PNG, into _textures/ and _screens/.
   models    Export all G* geometry records to OBJ (verts + UVs + surface
             groups). Run on a world _split directory.
   params    Dump P* boat physics parameter records to readable text.
-  all       extract, then textures, then world -- the whole set in one shot.
+  all       everything in one shot: extract, textures, world split (with
+            _textures/ and _screens/), models, and params.
 
 Every command takes -o/--outdir to choose the output directory. Defaults:
   extract/all -> <archive>_out/         world  -> <worldfile>_split/
@@ -470,7 +471,10 @@ def _read_palette(d):
 
 
 def world_textures(splitdir):
-    """Decode T* textures in a split dir to PNG. Returns (converted, skipped)."""
+    """Decode T* textures in a split dir to PNG (into _textures/).
+    Returns (converted, skipped)."""
+    pngdir = os.path.join(splitdir, '_textures')
+    os.makedirs(pngdir, exist_ok=True)
     pals = {}                                  # 6-char prefix -> palette (fmt 14)
     for f in glob.glob(os.path.join(splitdir, 'T*.bin')):
         d = open(f, 'rb').read()
@@ -534,7 +538,7 @@ def world_textures(splitdir):
                         put(x,y,i8,i8,i8,(v>>4)*17)
         else:
             skip += 1; continue
-        write_png(os.path.join(splitdir,
+        write_png(os.path.join(pngdir,
                   os.path.splitext(os.path.basename(f))[0] + '.png'),
                   w, h, bytes(rgba))
         ok += 1
@@ -543,7 +547,10 @@ def world_textures(splitdir):
 
 def world_screens(splitdir):
     """Decode B* loading screens (16-byte header: u24 size+'B', u32 2, u32 w,
-    u32 h, u32 2; then w*h ARGB1555 pixels, bottom-up). Returns count."""
+    u32 h, u32 2; then w*h ARGB1555 pixels, bottom-up) into _screens/.
+    Returns count."""
+    pngdir = os.path.join(splitdir, '_screens')
+    os.makedirs(pngdir, exist_ok=True)
     ok = 0
     for f in sorted(glob.glob(os.path.join(splitdir, 'B*.bin'))):
         d = open(f, 'rb').read()
@@ -560,7 +567,7 @@ def world_screens(splitdir):
                 o = ((h-1-y)*w + x) * 4
                 rgba[o:o+4] = bytes(((v>>10&31)*255//31, (v>>5&31)*255//31,
                                      (v&31)*255//31, 255))
-        write_png(os.path.join(splitdir,
+        write_png(os.path.join(pngdir,
                   os.path.splitext(os.path.basename(f))[0] + '.png'),
                   w, h, bytes(rgba))
         ok += 1
@@ -636,12 +643,16 @@ def cmd_all(args):
     print(f'{ok} EGF textures -> PNG')
     # split + decode the world container if we found it
     if world_path:
+        from argparse import Namespace
         data = open(world_path, 'rb').read()
         splitdir = world_path + '_split'
         nrec = world_split(data, splitdir)
         tok, tskip = world_textures(splitdir)
+        scr = world_screens(splitdir)
         print(f'world: {nrec} resources -> {splitdir}/ '
-              f'({tok} textures decoded, {tskip} skipped)')
+              f'({tok} textures, {scr} screens, {tskip} skipped)')
+        cmd_models(Namespace(splitdir=splitdir, outdir=None))
+        cmd_params(Namespace(splitdir=splitdir, outdir=None))
     else:
         print('world container not found in archive (skipped)')
 
