@@ -25,9 +25,6 @@ Still open (smaller, well-scoped):
 - **A\*** prop animations, **D\*** camera scripts — surveyed, undecoded (see FSD_format.md).
 - Glide capture remains unnecessary.
 
-## Environment warning (2026-07-02)
-The `out/` tree (450MB, ~50k files) **vanished mid-session** — something external deleted it (Windows Storage Sense auto-cleaning Downloads is the prime suspect; the project lives under `Downloads\`). Everything regenerates from `Hydro.fsd` in ~10 min, but consider moving the working copy out of Downloads.
-
 ## Recommended path forward: Glide capture (deterministic)
 Hydro Thunder is a 3dfx Glide game — no D3D/OpenGL imports; it `LoadLibrary`s `glide2x.dll` at runtime. That's the shortcut: capture one frame of real vertex data, diff against file bytes, and the format falls out in minutes instead of hours of static disassembly.
 
