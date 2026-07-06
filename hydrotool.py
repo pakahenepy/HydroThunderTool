@@ -799,6 +799,26 @@ def h_to_obj(d, out, texrefs=None):
     return len(verts), len(faces)
 
 
+def h_nodes(d, texrefs):
+    """Extract model-placement scene nodes from an H record via its named
+    G-model imports. Node record (from the patched pointer slot p):
+    +0x10 char tag[8], +0x1c f32 x,y,z, +0x2a u16 yaw (0..0xffff = 360deg),
+    +0x34 f32 scale. Returns [(model, tag, x, y, z, yaw_deg, scale)]."""
+    out = []
+    for loc, res in sorted(texrefs.items()):
+        if not res.startswith(('G', 'g')):
+            continue
+        p = loc + 4
+        if p + 0x40 > len(d):
+            continue
+        tag = d[p+0x10:p+0x18].rstrip(b'\x00').decode('latin1', 'replace')
+        x, y, z = struct.unpack_from('<3f', d, p + 0x1c)
+        yaw = struct.unpack_from('<H', d, p + 0x2a)[0] * 360.0 / 65536.0
+        scale = struct.unpack_from('<f', d, p + 0x34)[0]
+        out.append((res, tag, x, y, z, yaw, scale))
+    return out
+
+
 def cmd_tracks(args):
     import json
     src = args.splitdir
@@ -811,21 +831,35 @@ def cmd_tracks(args):
                       for k, v in json.load(f).items()}
     except (OSError, ValueError):
         pass
-    nobj = nskip = 0
+    nobj = nskip = nnodes = 0
     for f in sorted(glob.glob(os.path.join(src, 'H*.bin'))):
         d = open(f, 'rb').read()
         name = os.path.splitext(os.path.basename(f))[0]
+        refs = relocs.get(name, {})
         try:
-            r = h_to_obj(d, os.path.join(outdir, name + '.obj'),
-                         relocs.get(name))
+            r = h_to_obj(d, os.path.join(outdir, name + '.obj'), refs)
         except (struct.error, IndexError):
             r = None
+        nodes = h_nodes(d, refs)
+        if nodes:
+            with open(os.path.join(outdir, name + '_nodes.csv'), 'w',
+                      newline='') as nf:
+                w = csv.writer(nf)
+                w.writerow(['model', 'tag', 'x', 'y', 'z', 'yaw_deg', 'scale'])
+                for n in nodes:
+                    w.writerow([n[0], n[1], '%.3f' % n[2], '%.3f' % n[3],
+                                '%.3f' % n[4], '%.1f' % n[5], '%.3f' % n[6]])
+            nnodes += len(nodes)
         if r:
             nobj += 1
-            print('  %s: %d verts, %d faces' % (name, r[0], r[1]))
+            print('  %s: %d verts, %d faces, %d placements'
+                  % (name, r[0], r[1], len(nodes)))
         else:
             nskip += 1
-    print(f'{nobj} track meshes -> {outdir}/  ({nskip} skipped)')
+            if nodes:
+                print('  %s: no mesh, %d placements' % (name, len(nodes)))
+    print(f'{nobj} track meshes + {nnodes} object placements -> {outdir}/  '
+          f'({nskip} without mesh)')
 
 
 # ===========================================================================
