@@ -8,23 +8,31 @@ Works straight from Hydro.fsd. Subcommands:
   extract   Unpack every file to a folder, using original paths where known.
             Names come from an optional names.json (mine of HYDRO.EXE) merged
             with built-in pattern cracking; 536/542 files get real paths.
-  textures  Decode all EGF UI textures to PNG (ARGB1555 / ARGB4444, flipped).
-  world     Split the 104MB world container into its ~4588 named resources
-            and decode all T* textures to PNG (fmt = Glide GrTextureFormat_t).
+  textures  Decode EGF UI textures to PNG (ARGB1555 / ARGB4444, flipped).
+  world     Split the 104MB world container into its ~4588 named resources,
+            decode all T* textures to PNG (fmt = Glide GrTextureFormat_t)
+            and all B* loading screens.
+  models    Export all G* geometry records to OBJ (verts + UVs + surface
+            groups). Run on a world _split directory.
   params    Dump P* boat physics parameter records to readable text.
   all       extract, then textures, then world -- the whole set in one shot.
 
-Examples:
+Every command takes -o/--outdir to choose the output directory. Defaults:
+  extract/all -> <archive>_out/         world  -> <worldfile>_split/
+  models      -> <splitdir>/_models/    params -> <splitdir>/_params/
+  textures decodes in place, next to each .egf.
+
+Examples (a full run from scratch):
   python3 hydrotool.py all Hydro.fsd -o out
-  python3 hydrotool.py extract Hydro.fsd -o out
-  python3 hydrotool.py textures out/data/textures        # after extract
-  python3 hydrotool.py world out/data/... /path/to/worldfile
+  python3 hydrotool.py models out/bc0abcfa.bin_split
+  python3 hydrotool.py params out/bc0abcfa.bin_split
 
 Notes:
   * The single 640x480 title EGF (id 1720011c) is stored tiled and comes out
     scrambled; every other EGF is fine.
-  * ERM files are per-track radar maps, not 3D models. Boat/world geometry
-    lives inside the world container as G*/M* records (not yet decoded).
+  * ERM files are per-track radar maps, not 3D models.
+  * M* world records (terrain heightfield patches) are not decoded yet.
+  * Format documentation lives in FSD_format.md alongside this script.
 """
 
 import argparse
@@ -802,31 +810,35 @@ def main():
     sub = ap.add_subparsers(dest='cmd', required=True)
 
     p = sub.add_parser('extract', help='unpack all files from the FSD')
-    p.add_argument('archive'); p.add_argument('-o', '--outdir')
+    p.add_argument('archive', help='path to Hydro.fsd')
+    p.add_argument('-o', '--outdir', help='output dir (default: <archive>_out)')
     p.set_defaults(func=lambda a: cmd_extract(a))
 
     p = sub.add_parser('all', help='extract + decode textures + split world')
-    p.add_argument('archive'); p.add_argument('-o', '--outdir')
+    p.add_argument('archive', help='path to Hydro.fsd')
+    p.add_argument('-o', '--outdir', help='output dir (default: <archive>_out)')
     p.set_defaults(func=cmd_all)
 
     p = sub.add_parser('textures', help='decode EGF file(s) or a folder to PNG')
     p.add_argument('dir', help='an .egf file or a directory to search')
     p.set_defaults(func=cmd_textures)
 
-    p = sub.add_parser('world', help='split world container + decode T* textures')
-    p.add_argument('worldfile', help='the large ABCD... resource from extract')
-    p.add_argument('-o', '--outdir')
+    p = sub.add_parser('world', help='split world container + decode T* '
+                       'textures and B* loading screens')
+    p.add_argument('worldfile', help='the large ABCD... resource from extract '
+                   '(out/bc0abcfa.bin)')
+    p.add_argument('-o', '--outdir', help='output dir (default: <worldfile>_split)')
     p.set_defaults(func=cmd_world)
 
     p = sub.add_parser('params', help='dump P* boat physics parameters to text')
     p.add_argument('splitdir', help='a world _split directory')
-    p.add_argument('-o', '--outdir')
+    p.add_argument('-o', '--outdir', help='output dir (default: <splitdir>/_params)')
     p.set_defaults(func=cmd_params)
 
-    p = sub.add_parser('models', help='[experimental] dump G/M geometry: '
-                       'vertex OBJ point clouds + section structure JSON')
+    p = sub.add_parser('models', help='export all G* geometry records to OBJ '
+                       '(verts + UVs + surface groups)')
     p.add_argument('splitdir', help='a world _split directory')
-    p.add_argument('-o', '--outdir')
+    p.add_argument('-o', '--outdir', help='output dir (default: <splitdir>/_models)')
     p.set_defaults(func=cmd_models)
 
     args = ap.parse_args()
