@@ -14,11 +14,17 @@ Run everything: `python hydrotool.py all Hydro.fsd -o out`
 ## Boat/world geometry — G* SOLVED, exporter working (2026-07-02)
 **All 1,741 G models export to OBJ** (144,211 verts / 158,105 faces, 0 skipped): `python hydrotool.py models <splitdir>` → `_models/*.obj` with positions, UVs, and per-surface groups. Validated visually: Banshee/Razorback hulls, Tinytanic, trees, HUD elements all render correctly. Full format spec in FSD_format.md — the critical key was that **every offset is relative to record+4** (the engine's model pointer), and unused section slots contain stale tool-machine pointers (garbage — check counts before trusting offsets).
 
+## M* textures + material binding — SOLVED (2026-07-02, same day)
+- **M\*** (1,155) are NOT heightfields: they're the **mipmapped track-surface textures** (Glide fmt 11/12/13, full mip chain to 2×2). All decode into `_textures/`.
+- **Materials → textures SOLVED** via the record **relocation trailers** (`FDFDFDFD` + `{name[12], u32 location}` entries between records — what we thought was 0xCD fill). Named entries bind texture resources to each material's +0x14 slot. `world_split` saves them to `relocs.json`; `models` emits `.mtl` + `usemtl`, so OBJs open textured in Blender. Details in FSD_format.md.
+
 Still open (smaller, well-scoped):
-- **M\* records** (1,155): terrain heightfield patches — header says e.g. 128×128, body = byte-grid samples (`M2WCLIF_B10` = cliff). Different format from G, not yet decoded. This is the remaining piece of world geometry.
-- **Materials → textures**: surface records carry mat_off; material block has flags + likely a texture reference (in-memory it's a resolved pointer at +0x14; file-side encoding unconfirmed). Would let OBJs get textured with the already-decoded T* PNGs.
 - **H\*** per-track spatial/collision data, **A\*** prop animations, **D\*** camera scripts — surveyed, undecoded (see FSD_format.md).
-- Glide capture is now unnecessary for meshes; only useful if we ever want to verify materials/lighting behavior.
+- Track/world layout: G models are individual objects; whatever places them in the world (positions/instances) is presumably in the H\* files or the A/B/D remainder — needed to reassemble whole tracks.
+- Glide capture remains unnecessary.
+
+## Environment warning (2026-07-02)
+The `out/` tree (450MB, ~50k files) **vanished mid-session** — something external deleted it (Windows Storage Sense auto-cleaning Downloads is the prime suspect; the project lives under `Downloads\`). Everything regenerates from `Hydro.fsd` in ~10 min, but consider moving the working copy out of Downloads.
 
 ## Recommended path forward: Glide capture (deterministic)
 Hydro Thunder is a 3dfx Glide game — no D3D/OpenGL imports; it `LoadLibrary`s `glide2x.dll` at runtime. That's the shortcut: capture one frame of real vertex data, diff against file bytes, and the format falls out in minutes instead of hours of static disassembly.
