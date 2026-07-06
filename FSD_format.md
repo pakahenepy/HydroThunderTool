@@ -1,6 +1,6 @@
 # Hydro Thunder (PC) `Hydro.fsd` format
 
-Everything below verified against the retail file (67,234,920 bytes). All integers little-endian.
+Everything below verified against the retail file (67,234,920 bytes). All integers little-endian. TODO update this
 
 ## Container
 
