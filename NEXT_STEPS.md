@@ -18,9 +18,11 @@ Run everything: `python hydrotool.py all Hydro.fsd -o out`
 - **M\*** (1,155) are NOT heightfields: they're the **mipmapped track-surface textures** (Glide fmt 11/12/13, full mip chain to 2×2). All decode into `_textures/`.
 - **Materials → textures SOLVED** via the record **relocation trailers** (`FDFDFDFD` + `{name[12], u32 location}` entries between records — what we thought was 0xCD fill). Named entries bind texture resources to each material's +0x14 slot. `world_split` saves them to `relocs.json`; `models` emits `.mtl` + `usemtl`, so OBJs open textured in Blender. Details in FSD_format.md.
 
+## H* = the track scene files — partially mapped (2026-07-06)
+Confirmed: H files ARE the object-placement/track-assembly data (one per track + 3D menu scenes). Mapped so far: checkpoint/waypoint sector table, embedded track-surface geometry reusing G-format materials (M-texture imports patch mat+0x14), scene-node instance arrays (8-char type tags like `ANIMPENG`, model ptr + x/z + scale), 6,136-entry drawable pointer table → 308 chunk descriptors, spline waypoint streams. Full details + future entry points in FSD_format.md. **Remaining for track export**: find the embedded vertex/UV arrays (then the existing G-surface/triangle parsing exports the drivable track), catalog node types. Also fixed: reloc-trailer marker isn't always FDFDFDFD (match count field instead) — relocs.json now covers 1,635 records.
+
 Still open (smaller, well-scoped):
-- **H\*** per-track spatial/collision data, **A\*** prop animations, **D\*** camera scripts — surveyed, undecoded (see FSD_format.md).
-- Track/world layout: G models are individual objects; whatever places them in the world (positions/instances) is presumably in the H\* files or the A/B/D remainder — needed to reassemble whole tracks.
+- **A\*** prop animations, **D\*** camera scripts — surveyed, undecoded (see FSD_format.md).
 - Glide capture remains unnecessary.
 
 ## Environment warning (2026-07-02)

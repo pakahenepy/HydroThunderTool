@@ -115,7 +115,13 @@ Notes:
 - **B\*** = loading screens, fully decoded: 16-byte header `u24 size+'B', u32 2, u32 w, u32 h, u32 2` then w·h ARGB1555 bottom-up. 13 track banners (640×132/162/186) + 3 full 640×480 (Eurocom logo etc). `hydrotool.py world` exports them.
 - **A\*** = keyframe animations for ambient props (PENGuin, BEAR, HELIcopter, KAYAk, ORCA…): header has f32 1/30 (frame time) + count dwords, body = 4×4 float matrices. Not decoded further.
 - **D\*** = demo/credits camera scripts: ASCII-tagged records (`DOLLY_TARGET`, `ESPN_CAMERA`, `GAMECAMERA3`) + f32 params.
-- **H\*** = large per-track spatial data (`H?W/T<track>TRH0`, up to 3MB): u32 count @+4, then records of {u32 size/offset, f32 x, 211.0, f32 z, u32 flags}-ish. Likely track collision/visibility. Unexplored.
+- **H\*** = the per-track SCENE files (`H<track>T<name>TRH0`, one per track + menu scenes `HWTBTS_` boat-select / `HWTCRED` credits / `HWTHISC` high-score / `H_TMASS`). Partially mapped (2026-07-06):
+  - Header: u32 sector count @+4 (8/16), then sectors ×20B `{u32 node-list ptr*, f32 x, f32 y(=water level, e.g. 211), f32 z, u32 flags}` — positions trace the course sequentially = **checkpoint/progress waypoints**. Then a master header (@0x148 for ARCT): ~13 u32 counts + ~20 relocated section pointers.
+  - **Embedded track-surface geometry** using the same building blocks as G records: 44-byte materials (the track's 54 M-texture imports patch material+0x14 exactly like G models), sub-part/surface/triangle records.
+  - **Scene-node arrays**: 0x40-byte-ish nodes with a relocated model pointer, an 8-char type tag (e.g. `ANIMPENG` = animated penguin), f32 x/z position, scale, and params — the G-model **instance placements** (Arctic imports 166 G models). Node size varies by type (deltas 0x40/0x50/0x44 observed).
+  - A **6,136-entry relocated pointer table** (master drawable list) targeting 308 chunk descriptors (212B: two pointers, cos/sin heading, bbox, params), plus float **spline tables** ({x, z, dirx, dirz, dist, …} waypoint streams — racing line / camera paths).
+  - Trailer relocation counts are huge (11,057 for ARCT) — internal pointers outline the whole structure. NOTE: the trailer's first dword is NOT always `FDFDFDFD` (often 0) — match the count field instead.
+  - Still to do: pin down the embedded-geometry vertex/UV array locations (per chunk?) to export the drivable track mesh, and the full node-type catalog. Entry point for a future session: the game's track-descriptor table in .data (`0x4ef8b8`+, `{loading-screen name, H name, display name}` structs, referenced via pointer tables at `0x4eef48`/`0x4ef054`).
 - **I_SGAME_AA0**: `ISND` magic — sound-parameter table {u16 0x17, u16 sound_id, f32 value}.
 
 ### G* mesh format (draw path fully reverse-engineered from Hydro.exe, 2026-07-02)

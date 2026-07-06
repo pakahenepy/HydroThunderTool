@@ -433,12 +433,13 @@ def cmd_textures(args):
 def world_split(data, outdir):
     """Split the world container into its named sub-resources. Returns count.
 
-    Each record is followed by a relocation table: 'fdfdfdfd' marker, u32
-    entry count (= the record-table count field), then count x 16 bytes of
-    {char name[12], u32 location}. Zero-name entries are internal
-    offset->pointer fixups; named entries are resource imports (e.g. a G
-    model's texture bindings: location = material_offset+0x14). Named
-    entries are collected into relocs.json alongside index.csv."""
+    Each record is followed by a relocation table: u32 (varies -- 0 or
+    0xfdfdfdfd fill), u32 entry count (= the record-table count field),
+    then count x 16 bytes of {char name[12], u32 location}. Zero-name
+    entries are internal offset->pointer fixups; named entries are resource
+    imports (e.g. a G model's texture bindings: location =
+    material_offset+0x14). Named entries are collected into relocs.json
+    alongside index.csv."""
     import json
     count = struct.unpack_from('<I', data, 0x2c)[0]
     table = struct.unpack_from('<I', data, 0x20)[0]
@@ -456,7 +457,7 @@ def world_split(data, outdir):
         slack = 4 if name.startswith('P') else 0
         with open(os.path.join(outdir, fn + '.bin'), 'wb') as f:
             f.write(data[a:a+b+slack])
-        if c and data[a+b:a+b+4] == b'\xfd\xfd\xfd\xfd':
+        if c and struct.unpack_from('<I', data, a+b+4)[0] == c:
             named = {}
             for k in range(c):
                 e = a + b + 8 + k*16
