@@ -723,6 +723,112 @@ def cmd_all(args):
 
 
 # ===========================================================================
+# H* track scenes -- embedded world mesh export
+# ===========================================================================
+#
+# H-record: u24 size+'H', u32 sector count, sectors x 20B {ptr, x, y, z,
+# flags} (checkpoint waypoints), then a master header at 8+nsec*20:
+#   +0x90: u32 counts {surfaces, tris, materials, verts, uvs}
+#   +0xb0 (file coords): 9 slots (all offsets rel record+4, like G):
+#          [1]=surface pool {u32 tri_count, tri_ptr, mat_ptr}
+#          [2]=triangle pool (0x30, same layout as G)
+#          [3]=materials (0x2c, +0x14 patched via reloc trailer)
+#          [4]=vertices (24B)  [5]=uvs (8B)  [7]=normals (12B)
+# The rest of the file (chunk descriptors, scene-node instance arrays,
+# splines) is not needed for the mesh and is not parsed here.
+
+def h_to_obj(d, out, texrefs=None):
+    """Export an H track scene's embedded world mesh to OBJ (+MTL).
+    Returns (verts, faces) or None."""
+    if len(d) < 0x100 or d[3:4] != b'H':
+        return None
+    B = 4
+    nsec = struct.unpack_from('<I', d, 4)[0]
+    base = 8 + nsec*20
+    nsurf, ntri, nmat, nvert, nuv = struct.unpack_from('<5I', d, base+0x90)
+    slots = struct.unpack_from('<9I', d, base+0xb0)
+    surf_o, mat_s, vert_o, uv_o = slots[1]+B, slots[3], slots[4]+B, slots[5]+B
+    if not (nvert and nsurf) or vert_o + nvert*24 > len(d):
+        return None
+    verts = [struct.unpack_from('<3f', d, vert_o+i*24) for i in range(nvert)]
+    uvs = [struct.unpack_from('<2f', d, uv_o+i*8) for i in range(nuv)]
+    mats = {}
+    faces = []
+    for j in range(nsurf):
+        cnt, tptr, mptr = struct.unpack_from('<3I', d, surf_o+j*12)
+        if mptr not in mats:
+            tex = (texrefs or {}).get(mptr + 0x14)
+            mats[mptr] = tex or 'mat_%x' % mptr
+        for t in range(cnt):
+            to = tptr + B + t*0x30
+            if to + 0x30 > len(d):
+                return None
+            e = struct.unpack_from('<9H', d, to+0x1c)
+            vi, ui = e[0::3], e[2::3]
+            if any(v >= nvert for v in vi):
+                return None
+            faces.append((vi, ui, j, mptr))
+    textured = texrefs and any((m + 0x14) in texrefs for m in mats)
+    if textured:
+        with open(os.path.splitext(out)[0] + '.mtl', 'w') as f:
+            for mptr, mtl in sorted(mats.items()):
+                f.write('newmtl %s\n' % mtl)
+                if (mptr + 0x14) in texrefs:
+                    f.write('map_Kd ../_textures/%s.png\n' % texrefs[mptr+0x14])
+                f.write('\n')
+    with open(out, 'w') as f:
+        if textured:
+            f.write('mtllib %s.mtl\n' %
+                    os.path.splitext(os.path.basename(out))[0])
+        for v in verts:
+            f.write('v %.4f %.4f %.4f\n' % v)
+        for u in uvs:
+            f.write('vt %.4f %.4f\n' % u)
+        last = None
+        for vi, ui, j, mptr in faces:
+            if j != last:
+                f.write('g surf%d\n' % j)
+                if textured:
+                    f.write('usemtl %s\n' % mats[mptr])
+                last = j
+            if uvs and all(u < len(uvs) for u in ui):
+                f.write('f %d/%d %d/%d %d/%d\n' % (vi[0]+1, ui[0]+1,
+                        vi[1]+1, ui[1]+1, vi[2]+1, ui[2]+1))
+            else:
+                f.write('f %d %d %d\n' % (vi[0]+1, vi[1]+1, vi[2]+1))
+    return len(verts), len(faces)
+
+
+def cmd_tracks(args):
+    import json
+    src = args.splitdir
+    outdir = args.outdir or os.path.join(src, '_tracks')
+    os.makedirs(outdir, exist_ok=True)
+    relocs = {}
+    try:
+        with open(os.path.join(src, 'relocs.json')) as f:
+            relocs = {k: {int(l): n for l, n in v.items()}
+                      for k, v in json.load(f).items()}
+    except (OSError, ValueError):
+        pass
+    nobj = nskip = 0
+    for f in sorted(glob.glob(os.path.join(src, 'H*.bin'))):
+        d = open(f, 'rb').read()
+        name = os.path.splitext(os.path.basename(f))[0]
+        try:
+            r = h_to_obj(d, os.path.join(outdir, name + '.obj'),
+                         relocs.get(name))
+        except (struct.error, IndexError):
+            r = None
+        if r:
+            nobj += 1
+            print('  %s: %d verts, %d faces' % (name, r[0], r[1]))
+        else:
+            nskip += 1
+    print(f'{nobj} track meshes -> {outdir}/  ({nskip} skipped)')
+
+
+# ===========================================================================
 # P* boat physics parameters
 # ===========================================================================
 #
@@ -932,6 +1038,12 @@ def main():
                    '(out/bc0abcfa.bin)')
     p.add_argument('-o', '--outdir', help='output dir (default: <worldfile>_split)')
     p.set_defaults(func=cmd_world)
+
+    p = sub.add_parser('tracks', help='export H* track scenes: embedded world '
+                       'mesh to OBJ+MTL')
+    p.add_argument('splitdir', help='a world _split directory')
+    p.add_argument('-o', '--outdir', help='output dir (default: <splitdir>/_tracks)')
+    p.set_defaults(func=cmd_tracks)
 
     p = sub.add_parser('params', help='dump P* boat physics parameters to text')
     p.add_argument('splitdir', help='a world _split directory')
