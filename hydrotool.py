@@ -431,11 +431,21 @@ def cmd_textures(args):
 # ===========================================================================
 
 def world_split(data, outdir):
-    """Split the world container into its named sub-resources. Returns count."""
+    """Split the world container into its named sub-resources. Returns count.
+
+    Each record is followed by a relocation table: u32 (varies -- 0 or
+    0xfdfdfdfd fill), u32 entry count (= the record-table count field),
+    then count x 16 bytes of {char name[12], u32 location}. Zero-name
+    entries are internal offset->pointer fixups; named entries are resource
+    imports (e.g. a G model's texture bindings: location =
+    material_offset+0x14). Named entries are collected into relocs.json
+    alongside index.csv."""
+    import json
     count = struct.unpack_from('<I', data, 0x2c)[0]
     table = struct.unpack_from('<I', data, 0x20)[0]
     os.makedirs(outdir, exist_ok=True)
     rows = []
+    relocs = {}
     for i in range(count):
         o = table + i*0x4c
         a, b, c = struct.unpack_from('<3I', data, o)
@@ -443,15 +453,27 @@ def world_split(data, outdir):
         f1, f2, x = struct.unpack_from('<ffI', data, o+64)
         fn = ''.join(ch if ch.isalnum() or ch in '_-' else '_' for ch in name)
         # P records' declared size can undercut the last float32 by a couple
-        # of bytes (spills into 0xCD fill); keep 4 bytes of slack for those.
+        # of bytes (spills into the trailer); keep 4 bytes of slack for those.
         slack = 4 if name.startswith('P') else 0
         with open(os.path.join(outdir, fn + '.bin'), 'wb') as f:
             f.write(data[a:a+b+slack])
+        if c and struct.unpack_from('<I', data, a+b+4)[0] == c:
+            named = {}
+            for k in range(c):
+                e = a + b + 8 + k*16
+                rn = data[e:e+12].split(b'\0')[0].decode('latin1')
+                if rn:
+                    loc = struct.unpack_from('<I', data, e+12)[0]
+                    named[loc] = rn
+            if named:
+                relocs[fn] = named
         rows.append((name, f'{a:#x}', b, c, f1, f2, f'{x:08x}'))
     with open(os.path.join(outdir, 'index.csv'), 'w', newline='') as f:
         w = csv.writer(f)
         w.writerow(['name','offset','size','count','float1','float2','checksum'])
         w.writerows(rows)
+    with open(os.path.join(outdir, 'relocs.json'), 'w') as f:
+        json.dump(relocs, f, indent=0)
     return count
 
 
@@ -545,6 +567,45 @@ def world_textures(splitdir):
     return ok, skip
 
 
+def world_mtextures(splitdir):
+    """Decode M* mipmapped world-surface textures into _textures/.
+    Header: u24 size+'M', u32 0, u32 0, u32 2, u32 fmt (Glide enum: 11 =
+    ARGB_1555, 12 = ARGB_4444, 13 = AI_88), u32 w, u32 h, 3 u32s LOD info;
+    pixels at +0x28 top mip first, chain continues down to 2x2 (only the
+    top mip is exported). Returns count."""
+    pngdir = os.path.join(splitdir, '_textures')
+    os.makedirs(pngdir, exist_ok=True)
+    ok = 0
+    for f in sorted(glob.glob(os.path.join(splitdir, 'M*.bin'))):
+        d = open(f, 'rb').read()
+        if len(d) < 0x28 or d[3:4] != b'M':
+            continue
+        fmt, w, h = struct.unpack_from('<3I', d, 0x10)
+        if fmt not in (11, 12, 13) or not (w and h) or 0x28 + w*h*2 > len(d):
+            continue
+        px = array.array('H'); px.frombytes(d[0x28:0x28 + w*h*2])
+        rgba = bytearray(w*h*4)
+        for y in range(h):
+            for x in range(w):
+                v = px[y*w+x]
+                o = ((h-1-y)*w + x) * 4            # bottom-up like T*
+                if fmt == 11:      # ARGB_1555
+                    rgba[o:o+4] = bytes(((v>>10&31)*255//31,
+                                         (v>>5&31)*255//31,
+                                         (v&31)*255//31, 255 if v>>15 else 0))
+                elif fmt == 12:    # ARGB_4444
+                    rgba[o:o+4] = bytes(((v>>8&15)*17, (v>>4&15)*17,
+                                         (v&15)*17, (v>>12)*17))
+                else:              # AI_88
+                    i8 = v & 0xFF
+                    rgba[o:o+4] = bytes((i8, i8, i8, v>>8))
+        write_png(os.path.join(pngdir,
+                  os.path.splitext(os.path.basename(f))[0] + '.png'),
+                  w, h, bytes(rgba))
+        ok += 1
+    return ok
+
+
 def world_screens(splitdir):
     """Decode B* loading screens (16-byte header: u24 size+'B', u32 2, u32 w,
     u32 h, u32 2; then w*h ARGB1555 pixels, bottom-up) into _screens/.
@@ -582,8 +643,9 @@ def cmd_world(args):
     outdir = args.outdir or args.worldfile + '_split'
     n = world_split(data, outdir)
     ok, skip = world_textures(outdir)
+    mok = world_mtextures(outdir)
     scr = world_screens(outdir)
-    print(f'{n} resources -> {outdir}/  ({ok} textures decoded, '
+    print(f'{n} resources -> {outdir}/  ({ok} T + {mok} M textures decoded, '
           f'{skip} skipped, {scr} loading screens)')
 
 
@@ -648,9 +710,10 @@ def cmd_all(args):
         splitdir = world_path + '_split'
         nrec = world_split(data, splitdir)
         tok, tskip = world_textures(splitdir)
+        mok = world_mtextures(splitdir)
         scr = world_screens(splitdir)
         print(f'world: {nrec} resources -> {splitdir}/ '
-              f'({tok} textures, {scr} screens, {tskip} skipped)')
+              f'({tok} T + {mok} M textures, {scr} screens, {tskip} skipped)')
         cmd_models(Namespace(splitdir=splitdir, outdir=None))
         cmd_params(Namespace(splitdir=splitdir, outdir=None))
     else:
@@ -734,8 +797,10 @@ def cmd_params(args):
 # M* records are NOT this format (terrain heightfield patches, 128x128
 # byte grids) -- not handled here.
 
-def g_to_obj(d, out):
-    """Export one G record to OBJ. Returns (verts, faces) or None."""
+def g_to_obj(d, out, texrefs=None):
+    """Export one G record to OBJ (+ MTL when texture bindings are known).
+    texrefs: {location: resource_name} from relocs.json -- a material at
+    offset m uses texture texrefs[m + 0x14]. Returns (verts, faces) or None."""
     if len(d) < 0x54 or d[3:4] != b'G':
         return None
     B = 4
@@ -751,6 +816,7 @@ def g_to_obj(d, out):
     verts = [struct.unpack_from('<3f', d, vert_o+i*24) for i in range(nvert)]
     uvs = [struct.unpack_from('<2f', d, uv_o+i*8) for i in range(nuv)]
     faces = []
+    mats = {}                       # material offset -> mtl name
     for s in range(nsub):
         so = subs_o + s*0xc4
         if so + 0xc4 > len(d):
@@ -761,6 +827,9 @@ def g_to_obj(d, out):
             if po + 12 > len(d):
                 return None
             cnt, toff, moff = struct.unpack_from('<3I', d, po)
+            if moff not in mats:
+                tex = (texrefs or {}).get(moff + 0x14)
+                mats[moff] = tex or 'mat_%x' % moff
             for t in range(cnt):
                 to = toff + B + t*0x30
                 if to + 0x30 > len(d):
@@ -769,16 +838,30 @@ def g_to_obj(d, out):
                 vi, ui = e[0::3], e[2::3]
                 if any(v >= nvert for v in vi):
                     return None
-                faces.append((vi, ui, s, j))
+                faces.append((vi, ui, s, j, moff))
+    textured = texrefs and any((m + 0x14) in texrefs for m in mats)
+    if textured:
+        with open(os.path.splitext(out)[0] + '.mtl', 'w') as f:
+            for moff, mtl in sorted(mats.items()):
+                r, g, b, a = struct.unpack_from('<4f', d, moff + B + 0x18)
+                f.write('newmtl %s\nKd %.4f %.4f %.4f\n' % (mtl, r, g, b))
+                if (moff + 0x14) in texrefs:
+                    f.write('map_Kd ../_textures/%s.png\n' % texrefs[moff+0x14])
+                f.write('\n')
     with open(out, 'w') as f:
+        if textured:
+            f.write('mtllib %s.mtl\n' %
+                    os.path.splitext(os.path.basename(out))[0])
         for v in verts:
             f.write('v %.5f %.5f %.5f\n' % v)
         for u in uvs:
             f.write('vt %.5f %.5f\n' % u)
         last = None
-        for vi, ui, s, j in faces:
+        for vi, ui, s, j, moff in faces:
             if (s, j) != last:
                 f.write('g part%d_surf%d\n' % (s, j))
+                if textured:
+                    f.write('usemtl %s\n' % mats[moff])
                 last = (s, j)
             if uvs and all(u < len(uvs) for u in ui):
                 f.write('f %d/%d %d/%d %d/%d\n' % (vi[0]+1, ui[0]+1,
@@ -789,15 +872,24 @@ def g_to_obj(d, out):
 
 
 def cmd_models(args):
+    import json
     src = args.splitdir
     outdir = args.outdir or os.path.join(src, '_models')
     os.makedirs(outdir, exist_ok=True)
+    relocs = {}
+    try:
+        with open(os.path.join(src, 'relocs.json')) as f:
+            relocs = {k: {int(l): n for l, n in v.items()}
+                      for k, v in json.load(f).items()}
+    except (OSError, ValueError):
+        pass
     nobj = nvert = nface = nskip = 0
     for f in sorted(glob.glob(os.path.join(src, 'G*.bin'))):
         d = open(f, 'rb').read()
         name = os.path.splitext(os.path.basename(f))[0]
         try:
-            r = g_to_obj(d, os.path.join(outdir, name + '.obj'))
+            r = g_to_obj(d, os.path.join(outdir, name + '.obj'),
+                         relocs.get(name))
         except (struct.error, IndexError):
             r = None
         if r:

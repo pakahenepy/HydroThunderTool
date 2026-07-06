@@ -115,7 +115,13 @@ Notes:
 - **B\*** = loading screens, fully decoded: 16-byte header `u24 size+'B', u32 2, u32 w, u32 h, u32 2` then w·h ARGB1555 bottom-up. 13 track banners (640×132/162/186) + 3 full 640×480 (Eurocom logo etc). `hydrotool.py world` exports them.
 - **A\*** = keyframe animations for ambient props (PENGuin, BEAR, HELIcopter, KAYAk, ORCA…): header has f32 1/30 (frame time) + count dwords, body = 4×4 float matrices. Not decoded further.
 - **D\*** = demo/credits camera scripts: ASCII-tagged records (`DOLLY_TARGET`, `ESPN_CAMERA`, `GAMECAMERA3`) + f32 params.
-- **H\*** = large per-track spatial data (`H?W/T<track>TRH0`, up to 3MB): u32 count @+4, then records of {u32 size/offset, f32 x, 211.0, f32 z, u32 flags}-ish. Likely track collision/visibility. Unexplored.
+- **H\*** = the per-track SCENE files (`H<track>T<name>TRH0`, one per track + menu scenes `HWTBTS_` boat-select / `HWTCRED` credits / `HWTHISC` high-score / `H_TMASS`). Partially mapped (2026-07-06):
+  - Header: u32 sector count @+4 (8/16), then sectors ×20B `{u32 node-list ptr*, f32 x, f32 y(=water level, e.g. 211), f32 z, u32 flags}` — positions trace the course sequentially = **checkpoint/progress waypoints**. Then a master header (@0x148 for ARCT): ~13 u32 counts + ~20 relocated section pointers.
+  - **Embedded track-surface geometry** using the same building blocks as G records: 44-byte materials (the track's 54 M-texture imports patch material+0x14 exactly like G models), sub-part/surface/triangle records.
+  - **Scene-node arrays**: 0x40-byte-ish nodes with a relocated model pointer, an 8-char type tag (e.g. `ANIMPENG` = animated penguin), f32 x/z position, scale, and params — the G-model **instance placements** (Arctic imports 166 G models). Node size varies by type (deltas 0x40/0x50/0x44 observed).
+  - A **6,136-entry relocated pointer table** (master drawable list) targeting 308 chunk descriptors (212B: two pointers, cos/sin heading, bbox, params), plus float **spline tables** ({x, z, dirx, dirz, dist, …} waypoint streams — racing line / camera paths).
+  - Trailer relocation counts are huge (11,057 for ARCT) — internal pointers outline the whole structure. NOTE: the trailer's first dword is NOT always `FDFDFDFD` (often 0) — match the count field instead.
+  - Still to do: pin down the embedded-geometry vertex/UV array locations (per chunk?) to export the drivable track mesh, and the full node-type catalog. Entry point for a future session: the game's track-descriptor table in .data (`0x4ef8b8`+, `{loading-screen name, H name, display name}` structs, referenced via pointer tables at `0x4eef48`/`0x4ef054`).
 - **I_SGAME_AA0**: `ISND` magic — sound-parameter table {u16 0x17, u16 sound_id, f32 value}.
 
 ### G* mesh format (draw path fully reverse-engineered from Hydro.exe, 2026-07-02)
@@ -156,6 +162,17 @@ Materials: surface+8 → material block: +0 u16 render flags (bit0 gouraud?, bit
 
 **SOLVED (same day): the base for every offset in the record is `record+4`** — identical to the in-memory model pointer, so file slot k = draw-code slot k with +4 on the stored offset. Earlier "base 0x4c" readings were aliasing artifacts of self-similar 24-byte arrays. Corrected layout: slots[0]=0 (self), [1]=sub-parts (0xc4; +4=nsurf, +8=surface-list offset), [2]=surface pool ({u32 tri_count, tri_off, mat_off} ×12B), [3]=triangle pool, [4]=materials, [5]=vertices (24B), [6]=UVs, [7]=runtime normal-record cache (zeros, count@+0x20 × 24B), [8]=normal vectors. **Unused slots hold stale tool-machine pointers — validate against counts before dereferencing.** `hydrotool.py models` exports all 1,741 G records to OBJ (verified: boat hulls, Tinytanic, props all render correctly; 144k verts total).
 
-**M\* records are a different format**: no offset table; header counts then what looks like heightfield byte grids (e.g. 128×128 for `M2WCLIF_B10`). Terrain patches — undecoded.
+### M* records = mipmapped world-surface textures (fully decoded)
+
+Not heightfields. Header: u24 size+`'M'`, u32 0, u32 0 (runtime slots), u32 2, **u32 fmt (Glide enum: 11=ARGB_1555 for 1,119 files, 12=ARGB_4444, 13=AI_88)**, u32 w, u32 h, 3 u32s of LOD/mip info; pixels at +0x28, top mip first, full chain down to 2×2. Size formula `0x28 + 2·(w·h + w/2·h/2 + … + 2·2)` is exact on all 1,155 files. These are the track-surface textures (CLIF, SAND, BLDG, ROOF, WALL…) that G-model materials bind to; `hydrotool.py world` decodes them into `_textures/` beside the T* set.
+
+### Record relocation trailers (the "0xCD fill" between records)
+
+Every world-container record is followed by: `FD FD FD FD` marker, u32 entry count (**= the record table's `count` field**), then count × 16-byte entries `{char name[12], u32 location}`. Locations are in the record's rel-to-+4 coordinate space:
+
+- **Zero-name entries** = internal fixups — locations of offset fields the loader converts to pointers (the 9 header slots, each sub-part's surface-list field, …).
+- **Named entries** = resource imports — the loader resolves `name` and stores the pointer at `location`. For G models these are the **texture bindings**: each entry's location = a material's `+0x14` field, name = the M\*/T\* texture resource.
+
+`world_split` now saves the named entries to `relocs.json`, and `models` uses them to emit `.mtl` files (`map_Kd ../_textures/<name>.png`) with `usemtl` per surface. Material record (44 bytes, rel +4): u16 flags, u16 tri_start, u32 tri_count, u32 0, f32 uv-scale?, f32 uv-scale?, u32 texture-pointer slot (+0x14, patched via reloc), f32×4 RGBA color (+0x18), u32 color-table idx (+0x28).
 
 Not palettes. Format: u24 size + `'P'`, u32 1, u32 param_count, then params back to back: `name\0` + u8 type + value, where type 0 = `\0`-terminated string, type 1 = float32. E.g. `PBBBANSHUP0` → `SELECT_BOAT = Banshee`, `MASS = 14854.9`, `GRAVITY_MIN = 200`, drag/buoyancy/handling tables (129 params). 42 files = 13 boats × 2 tuning variants + per-track boat variants (`P?X*HUH0/1`). Caveat: the declared record size systematically undercuts the last float by ~2 bytes (it spills into the 0xCD inter-record fill) — parse by count, not size. `hydrotool.py params <splitdir>` dumps them all to text.
