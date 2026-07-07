@@ -132,13 +132,17 @@ def parse_h_nodes(d, texrefs):
 def parse_anim(d):
     """Parse an A record -> (nframes, nbones, dt, binds, keys).
 
-    Layout: header, then one 108-byte bind record per bone (records are
-    {12f local matrix+trans, 12f root matrix+trans, 1.0, 1.0, 0.0} and the
-    binds are separated by {u32,u32} pairs), then nframes*nbones key
-    records, frame-major. Playback transform for bone b at frame f:
-    Root(f,b) @ Local(f,b) @ inverse(RootBind(b) @ LocalBind(b)) -- the
-    identity at the bind pose, so assembled model-space parts animate as
-    deltas."""
+    Layout: header, then one 108-byte bind record per bone (separated by
+    {u32 id, u32 offset} pairs whose offset points at that bone's key run),
+    then nframes*nbones key records, BONE-major (all frames of bone 0,
+    then bone 1, ...). Each 108-byte record = {12f matrix+trans, 12f its
+    precomputed inverse, 1.0, 1.0, 0.0}; the 3x3 is stored column-major
+    (transpose on read). Playback for bone b, frame f:
+    M(keys[b*nframes+f]) @ inverse(M(binds[b])) -- identity at bind, so
+    the assembled model-space parts animate as deltas. Verified: penguin
+    walk keeps every part at its bind position at frame 0 with small
+    smooth in-place motion (locomotion comes from game AI).
+    """
     if d[3:4] != b'A':
         raise ValueError('not an A record')
     nframes, nbones = struct.unpack_from('<2H', d, 4)
@@ -498,9 +502,10 @@ if IN_BLENDER:
 
     def _mat4(blk):
         m, t = blk[:3], blk[3]
-        return Matrix(((m[0][0], m[0][1], m[0][2], t[0]),
-                       (m[1][0], m[1][1], m[1][2], t[1]),
-                       (m[2][0], m[2][1], m[2][2], t[2]),
+        # stored column-major: transpose the 3x3 on read
+        return Matrix(((m[0][0], m[1][0], m[2][0], t[0]),
+                       (m[0][1], m[1][1], m[2][1], t[1]),
+                       (m[0][2], m[1][2], m[2][2], t[2]),
                        (0, 0, 0, 1)))
 
     def import_anim(binpath, root, as_nla=True):
@@ -516,18 +521,16 @@ if IN_BLENDER:
         inv_bind = []
         for b in range(nbones):
             if b < len(binds):
-                loc, rt = binds[b]
-                inv_bind.append((_mat4(rt) @ _mat4(loc)).inverted_safe())
+                inv_bind.append(_mat4(binds[b][0]).inverted_safe())
             else:
                 inv_bind.append(Matrix.Identity(4))
         per_ob = {ob: [] for ob in targets}
-        for f in range(nframes):
-            for bidx in range(min(nbones, len(targets))):
-                k = f * nbones + bidx
+        for bidx in range(min(nbones, len(targets))):
+            for f in range(nframes):
+                k = bidx * nframes + f          # keys are bone-major
                 if k >= len(keys):
                     break
-                loc, rt = keys[k]
-                mat = _mat4(rt) @ _mat4(loc) @ inv_bind[bidx]
+                mat = _mat4(keys[k][0]) @ inv_bind[bidx]
                 per_ob[targets[bidx]].append((f + 1, mat))
         for ob, frames in per_ob.items():
             if frames:
