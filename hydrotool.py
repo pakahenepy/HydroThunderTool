@@ -472,7 +472,7 @@ def world_split(data, outdir):
         fn = ''.join(ch if ch.isalnum() or ch in '_-' else '_' for ch in name)
         # P records' declared size can undercut the last float32 by a couple
         # of bytes (spills into the trailer); keep 4 bytes of slack for those.
-        slack = 4 if name.startswith('P') else 0
+        slack = 4 if name[:1] in ('P', 'D') else 0
         with open(os.path.join(outdir, fn + '.bin'), 'wb') as f:
             f.write(data[a:a+b+slack])
         if c and struct.unpack_from('<I', data, a+b+4)[0] == c:
@@ -735,11 +735,56 @@ def cmd_all(args):
         cmd_models(Namespace(splitdir=splitdir, outdir=None))
         cmd_tracks(Namespace(splitdir=splitdir, outdir=None))
         cmd_params(Namespace(splitdir=splitdir, outdir=None))
+        cmd_cameras(Namespace(splitdir=splitdir, outdir=None))
         cmd_sounds(Namespace(extractdir=outdir, outdir=None))
     else:
         print('world container not found in archive (skipped)')
 
 
+
+
+# ===========================================================================
+# D* demo camera scripts
+# ===========================================================================
+#
+# D-record: u24 size+'D', u32 record count, then records back to back:
+#   {u32 time_s, f32 x, char camera[12], u32 nparams, f32 params[nparams]}
+# A timed cut list for the attract-mode/credits director: at time_s switch
+# to the named camera mode with the given parameters (last param is usually
+# the FOV, 90). HIGH_SCORE_ {1,n}/{0,n} records toggle the high-score
+# overlay. Param counts are fixed per camera type (verified all 7 files).
+# NB: like P records, the declared size can undercut the final float (it
+# spills into the trailer) -- world_split keeps 4 bytes of slack.
+
+def cmd_cameras(args):
+    src = args.splitdir
+    outdir = args.outdir or os.path.join(src, '_cameras')
+    os.makedirs(outdir, exist_ok=True)
+    n = 0
+    for f in sorted(glob.glob(os.path.join(src, 'D*.bin'))):
+        d = open(f, 'rb').read()
+        if d[3:4] != b'D':
+            continue
+        name = os.path.splitext(os.path.basename(f))[0]
+        nrec = struct.unpack_from('<I', d, 4)[0]
+        pos = 8
+        with open(os.path.join(outdir, name + '.txt'), 'w') as out:
+            out.write('# time_s  camera        x       params\n')
+            for i in range(nrec):
+                if pos + 24 > len(d):
+                    break
+                t, x = struct.unpack_from('<If', d, pos); pos += 8
+                cam = d[pos:pos+12].split(b'\x00')[0].decode('latin1')
+                pos += 12
+                np_ = struct.unpack_from('<I', d, pos)[0]; pos += 4
+                if np_ > 32 or pos + np_*4 > len(d):
+                    break
+                params = struct.unpack_from('<%df' % np_, d, pos)
+                pos += np_*4
+                out.write('%6d  %-12s %-7g %s\n'
+                          % (t, cam, x, ' '.join('%g' % p for p in params)))
+        n += 1
+    print(f'{n} camera scripts -> {outdir}/')
 
 
 # ===========================================================================
@@ -1164,6 +1209,11 @@ def main():
                    '(out/bc0abcfa.bin)')
     p.add_argument('-o', '--outdir', help='output dir (default: <worldfile>_split)')
     p.set_defaults(func=cmd_world)
+
+    p = sub.add_parser('cameras', help='dump D* demo camera cut lists to text')
+    p.add_argument('splitdir', help='a world _split directory')
+    p.add_argument('-o', '--outdir', help='output dir (default: <splitdir>/_cameras)')
+    p.set_defaults(func=cmd_cameras)
 
     p = sub.add_parser('sounds', help='decode all ESF sounds/music to WAV')
     p.add_argument('extractdir', help='an extract output dir (contains sound/, wavmusic/)')

@@ -25,7 +25,7 @@ Confirmed: H files ARE the object-placement/track-assembly data (one per track +
 All 459 ESF (425 SFX + 34 music) decode to WAV via `hydrotool.py sounds` (IMA ADPCM, 11025 Hz mono 16-bit; confirmed against exe decoder @0x46a6b0 and vgmstream esf.c).
 
 Still open (smaller, well-scoped):
-- **A\*** prop animations, **D\*** camera scripts — surveyed, undecoded (see FSD_format.md).
+- **A\*** prop animations — surveyed, undecoded. (**D\*** camera scripts DECODED 2026-07-07 — `hydrotool.py cameras`.)
 - Glide capture remains unnecessary.
 
 ## Recommended path forward: Glide capture (deterministic)
