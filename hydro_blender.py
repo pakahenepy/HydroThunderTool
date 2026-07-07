@@ -130,25 +130,35 @@ def parse_h_nodes(d, texrefs):
 
 
 def parse_anim(d):
-    """Parse an A record -> (nframes, nbones, dt, keys). Each key is
-    (mat3x3 rows, translation) from the first 12-float block."""
+    """Parse an A record -> (nframes, nbones, dt, binds, keys).
+
+    Layout: header, then one 108-byte bind record per bone (records are
+    {12f local matrix+trans, 12f root matrix+trans, 1.0, 1.0, 0.0} and the
+    binds are separated by {u32,u32} pairs), then nframes*nbones key
+    records, frame-major. Playback transform for bone b at frame f:
+    Root(f,b) @ Local(f,b) @ inverse(RootBind(b) @ LocalBind(b)) -- the
+    identity at the bind pose, so assembled model-space parts animate as
+    deltas."""
     if d[3:4] != b'A':
         raise ValueError('not an A record')
     nframes, nbones = struct.unpack_from('<2H', d, 4)
     dt = struct.unpack_from('<f', d, 8)[0]
-    keys = []
+    recs = []
     pos = 0x14
-    while pos + 108 <= len(d):
-        v = struct.unpack_from('<27f', d, pos)
-        if v[24] != 1.0 or v[25] != 1.0:   # skip stray {u32,u32} pair
-            pos += 4
-            continue
-        m = ((v[0], v[1], v[2]), (v[3], v[4], v[5]), (v[6], v[7], v[8]))
-        keys.append((m, (v[9], v[10], v[11])))
-        pos += 108
-    if len(keys) == nframes*nbones + 1:    # leading bind-pose key
-        keys = keys[1:]
-    return nframes, nbones, dt, keys
+    while pos + 12 <= len(d):
+        if pos + 108 <= len(d):
+            v = struct.unpack_from('<27f', d, pos)
+            if v[24] == 1.0 and v[25] == 1.0 and v[26] == 0.0:
+                loc = ((v[0], v[1], v[2]), (v[3], v[4], v[5]),
+                       (v[6], v[7], v[8]), (v[9], v[10], v[11]))
+                root = ((v[12], v[13], v[14]), (v[15], v[16], v[17]),
+                        (v[18], v[19], v[20]), (v[21], v[22], v[23]))
+                recs.append((loc, root))
+                pos += 108
+                continue
+        pos += 8                            # bone-track separator
+    binds, keys = recs[:nbones], recs[nbones:]
+    return nframes, nbones, dt, binds, keys
 
 
 def find_anims(splitdir, model_name):
@@ -486,27 +496,38 @@ if IN_BLENDER:
         ob.matrix_basis = rest_basis                # restore rest pose
         ob.matrix_parent_inverse = rest_pinv
 
+    def _mat4(blk):
+        m, t = blk[:3], blk[3]
+        return Matrix(((m[0][0], m[0][1], m[0][2], t[0]),
+                       (m[1][0], m[1][1], m[1][2], t[1]),
+                       (m[2][0], m[2][1], m[2][2], t[2]),
+                       (0, 0, 0, 1)))
+
     def import_anim(binpath, root, as_nla=True):
         anim_name = os.path.splitext(os.path.basename(binpath))[0]
-        nframes, nbones, dt, keys = parse_anim(open(binpath, 'rb').read())
+        nframes, nbones, dt, binds, keys = parse_anim(
+            open(binpath, 'rb').read())
         parts = sorted((o for o in root.children), key=lambda o: o.name)
         scn = bpy.context.scene
         scn.render.fps = max(1, round(1.0 / dt)) if dt > 0 else 30
         scn.frame_start = 1
         scn.frame_end = max(scn.frame_end, nframes)
         targets = parts if (nbones > 1 and parts) else [root]
+        inv_bind = []
+        for b in range(nbones):
+            if b < len(binds):
+                loc, rt = binds[b]
+                inv_bind.append((_mat4(rt) @ _mat4(loc)).inverted_safe())
+            else:
+                inv_bind.append(Matrix.Identity(4))
         per_ob = {ob: [] for ob in targets}
         for f in range(nframes):
             for bidx in range(min(nbones, len(targets))):
                 k = f * nbones + bidx
                 if k >= len(keys):
                     break
-                m, t = keys[k]
-                mat = Matrix((
-                    (m[0][0], m[0][1], m[0][2], t[0]),
-                    (m[1][0], m[1][1], m[1][2], t[1]),
-                    (m[2][0], m[2][1], m[2][2], t[2]),
-                    (0, 0, 0, 1)))
+                loc, rt = keys[k]
+                mat = _mat4(rt) @ _mat4(loc) @ inv_bind[bidx]
                 per_ob[targets[bidx]].append((f + 1, mat))
         for ob, frames in per_ob.items():
             if frames:
