@@ -18,6 +18,7 @@ asset archive.
   relocation trailers (format reversed from the exe's draw code)
 - **Boat physics** — `P*` parameter records → readable text (mass, drag,
   buoyancy, handling for all 13 boats)
+- **Audio** - all 459 ESF sounds + music -> 16-bit WAV (IMA ADPCM)
 
 ## Usage
 

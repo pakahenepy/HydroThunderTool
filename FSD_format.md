@@ -63,7 +63,7 @@ def encode_string(s):
 
 Every asset begins `4CC type + u32 info`, data at +8.
 
-**ESF** (`"ESF\x08"`) — mono ADPCM sound, stored raw. info low 24 bits = decoded PCM byte count (= (filesize−8)×4), top byte flags (0x90/0xD0). 4-bit IMA-style ADPCM (decoder in RazorBack's `Decode_Asset`).
+**ESF** (`"ESF"` + u8 version, 8 here) - mono sound, stored raw. info low 24 bits = decoded PCM byte count (= (filesize-8)*4), top-byte flags: **0x80 = DVI IMA ADPCM** (else raw PCM16), **0x40 = loop**, **0x20 = 22050 Hz (else 11025)**, **0x10 = 16-bit**. All 459 retail files are 0x90/0xD0 -> IMA, 11025 Hz, 16-bit. Decode: standard IMA step/index tables, high nibble first, state {sample=0, index=0} (exe decoder at `0x46a6b0`, tables `0x4f4790`/`0x4f47d0`; matches vgmstream esf.c). `hydrotool.py sounds` -> `sounds/wav/`.
 
 **EGF** (`"EGF\x04"`) — 16bpp texture. info: bits 11..31 = height, bits 1..10 = width (NPOT widths padded — stride = payload/(h·2)), bit 0 = format: **0 = ARGB1555 (bit15 = 1-bit alpha), 1 = ARGB4444**. Pixels row-major at +8. Converter: `egf2png.py`. EGFs wider than 256 (the single 640x480 `loading.egf`) are stored as row-major 256x256 tiles (Glide's max texture size); `egf_to_png` de-tiles them. Decoded 2026-07-06 — renders perfectly.
 
