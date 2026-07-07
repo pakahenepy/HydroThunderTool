@@ -151,6 +151,17 @@ def parse_anim(d):
     return nframes, nbones, dt, keys
 
 
+def find_anims(splitdir, model_name):
+    """A records matching a G model's name stem (same track/category/name,
+    any variant suffix), e.g. GAXBEAR_AH0 -> AAXBEAR_*."""
+    stem = model_name[1:9]
+    out = []
+    for f in sorted(os.listdir(splitdir)):
+        if f.endswith('.bin') and f[:1] in 'Aa' and f[1:9].upper() == stem.upper():
+            out.append(os.path.join(splitdir, f))
+    return out
+
+
 def load_relocs(splitdir):
     try:
         with open(os.path.join(splitdir, 'relocs.json')) as f:
@@ -379,7 +390,7 @@ if IN_BLENDER:
         coll.objects.link(ob)
         return ob
 
-    def import_model(binpath, coll=None):
+    def import_model(binpath, coll=None, with_anims=True):
         splitdir = os.path.dirname(binpath)
         name = os.path.splitext(os.path.basename(binpath))[0]
         g = parse_g(open(binpath, 'rb').read())
@@ -392,6 +403,12 @@ if IN_BLENDER:
             ob = _mesh_from('%s.part%d' % (name, i), g, surfaces,
                             splitdir, texrefs, coll)
             ob.parent = root
+        if with_anims:
+            for ap in find_anims(splitdir, name):
+                try:
+                    import_anim(ap, root)
+                except Exception:
+                    pass
         return root
 
     def import_track(binpath):
@@ -421,7 +438,7 @@ if IN_BLENDER:
                 scn.collection.children.link(mcoll)
                 path = os.path.join(splitdir, model + '.bin')
                 if os.path.isfile(path):
-                    import_model(path, mcoll)
+                    import_model(path, mcoll, with_anims=True)
                 bpy.context.view_layer.layer_collection.children[
                     mcoll.name].exclude = True
                 cache[model] = mcoll
@@ -434,15 +451,38 @@ if IN_BLENDER:
             inst.scale = (scale,) * 3
             scn.collection.objects.link(inst)
 
-    def import_anim(binpath, root):
+    def _key_object(ob, anim_name, frames):
+        """Bake (frame, Matrix) list into a muted NLA track on ob."""
+        ad = ob.animation_data_create()
+        act = bpy.data.actions.new('%s.%s' % (anim_name, ob.name))
+        ad.action = act
+        for f, mat in frames:
+            ob.matrix_parent_inverse.identity()
+            ob.matrix_basis = mat
+            ob.keyframe_insert('location', frame=f)
+            ob.keyframe_insert('rotation_euler', frame=f)
+            ob.keyframe_insert('scale', frame=f)
+        try:
+            ad.action = None
+        except Exception:
+            pass
+        track = ad.nla_tracks.new()
+        track.name = anim_name
+        track.mute = True
+        track.strips.new(anim_name, 1, act)
+
+    def import_anim(binpath, root, as_nla=True):
+        anim_name = os.path.splitext(os.path.basename(binpath))[0]
         nframes, nbones, dt, keys = parse_anim(open(binpath, 'rb').read())
         parts = sorted((o for o in root.children), key=lambda o: o.name)
         scn = bpy.context.scene
         scn.render.fps = max(1, round(1.0 / dt)) if dt > 0 else 30
         scn.frame_start = 1
-        scn.frame_end = nframes
+        scn.frame_end = max(scn.frame_end, nframes)
+        targets = parts if (nbones > 1 and parts) else [root]
+        per_ob = {ob: [] for ob in targets}
         for f in range(nframes):
-            for bidx in range(min(nbones, len(parts))):
+            for bidx in range(min(nbones, len(targets))):
                 k = f * nbones + bidx
                 if k >= len(keys):
                     break
@@ -452,12 +492,40 @@ if IN_BLENDER:
                     (m[1][0], m[1][1], m[1][2], t[1]),
                     (m[2][0], m[2][1], m[2][2], t[2]),
                     (0, 0, 0, 1)))
-                ob = parts[bidx]
-                ob.matrix_parent_inverse.identity()
-                ob.matrix_basis = mat
-                ob.keyframe_insert('location', frame=f+1)
-                ob.keyframe_insert('rotation_euler', frame=f+1)
-                ob.keyframe_insert('scale', frame=f+1)
+                per_ob[targets[bidx]].append((f + 1, mat))
+        for ob, frames in per_ob.items():
+            if frames:
+                _key_object(ob, anim_name, frames)
+        if not as_nla:
+            set_animation(root, anim_name)
+
+    def _anim_objects(root):
+        yield root
+        for ob in root.children_recursive:
+            yield ob
+
+    def set_animation(root, anim_name):
+        """Unmute NLA tracks named anim_name under root; mute the rest.
+        anim_name None/'' = static pose."""
+        for ob in _anim_objects(root):
+            ad = ob.animation_data
+            if not ad:
+                continue
+            for tr in ad.nla_tracks:
+                tr.mute = (tr.name != anim_name)
+            if anim_name:
+                for tr in ad.nla_tracks:
+                    if tr.name == anim_name:
+                        ob.matrix_parent_inverse.identity()
+
+    def anim_names(root):
+        names = []
+        for ob in _anim_objects(root):
+            if ob.animation_data:
+                for tr in ob.animation_data.nla_tracks:
+                    if tr.name not in names:
+                        names.append(tr.name)
+        return names
 
     def export_model(objs, outpath):
         depsgraph = bpy.context.evaluated_depsgraph_get()
@@ -539,6 +607,10 @@ if IN_BLENDER:
             type=bpy.types.OperatorFileListElement, options={'HIDDEN'})
         directory: bpy.props.StringProperty(subtype='DIR_PATH',
                                             options={'HIDDEN'})
+        import_anims: bpy.props.BoolProperty(
+            name='Import animations', default=True,
+            description='Also import matching A* animations as toggleable '
+                        'NLA tracks (use Play Animation in the panel)')
         def execute(self, context):
             paths = [os.path.join(self.directory, f.name)
                      for f in self.files if f.name] or [self.filepath]
@@ -549,7 +621,7 @@ if IN_BLENDER:
                     self.report({'WARNING'}, base + ' is not a G model')
                     continue
                 try:
-                    import_model(p)
+                    import_model(p, with_anims=self.import_anims)
                     done += 1
                 except Exception as e:
                     self.report({'WARNING'}, '%s: %s' % (base, e))
@@ -572,6 +644,36 @@ if IN_BLENDER:
             import_track(self.filepath)
             return {'FINISHED'}
 
+    def _root_of(ob):
+        while ob and ob.parent:
+            ob = ob.parent
+        return ob
+
+    def _anim_items(self, context):
+        items = [('__none__', '(static)', 'mute all animations')]
+        ob = context.active_object
+        if ob:
+            for n in anim_names(_root_of(ob)):
+                items.append((n, n, ''))
+        return items
+
+    class HYDRO_OT_set_anim(bpy.types.Operator):
+        bl_idname = 'hydro.set_anim'
+        bl_label = 'Play Animation'
+        bl_property = 'anim'
+        anim: bpy.props.EnumProperty(items=_anim_items)
+        def execute(self, context):
+            ob = context.active_object
+            if not ob:
+                self.report({'ERROR'}, 'select a model first')
+                return {'CANCELLED'}
+            name = None if self.anim == '__none__' else self.anim
+            set_animation(_root_of(ob), name)
+            return {'FINISHED'}
+        def invoke(self, context, event):
+            context.window_manager.invoke_search_popup(self)
+            return {'FINISHED'}
+
     class HYDRO_OT_import_anim(bpy.types.Operator, ImportHelper):
         bl_idname = 'hydro.import_anim'
         bl_label = 'Import Hydro Anim (A*.bin) onto selected model root'
@@ -589,7 +691,7 @@ if IN_BLENDER:
                 return {'CANCELLED'}
             while root.parent:
                 root = root.parent
-            import_anim(self.filepath, root)
+            import_anim(self.filepath, root, as_nla=False)
             return {'FINISHED'}
 
     class HYDRO_OT_export_model(bpy.types.Operator, ExportHelper):
@@ -613,10 +715,13 @@ if IN_BLENDER:
             c.operator('hydro.import_track', text='Import Track (H)')
             c.operator('hydro.import_anim', text='Import Anim (A)')
             c.separator()
+            c.operator('hydro.set_anim', text='Play Animation...')
+            c.separator()
             c.operator('hydro.export_model', text='Export Model (G)')
 
     CLASSES = (HYDRO_OT_import_model, HYDRO_OT_import_track,
-               HYDRO_OT_import_anim, HYDRO_OT_export_model, HYDRO_PT_panel)
+               HYDRO_OT_import_anim, HYDRO_OT_set_anim,
+               HYDRO_OT_export_model, HYDRO_PT_panel)
 
     def register():
         for cls in CLASSES:
