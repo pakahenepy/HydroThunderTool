@@ -26,6 +26,7 @@ All 459 ESF (425 SFX + 34 music) decode to WAV via `hydrotool.py sounds` (IMA AD
 
 Still open (smaller, well-scoped):
 - **A\*** animations mostly decoded (`hydrotool.py anims` → JSON; the second matrix block per key is uninterpreted). **D\*** camera scripts DECODED (`cameras`).
+- **Blender add-on SHIPPED (2026-07-07)**: `hydro_blender.py` — import G models / H tracks (with placements) / A anims (bones map 1:1 to model sub-parts, verified across 70 pairs); export selection to a game-ready G record + reloc trailer (round-trip: retail duck rebuilds with identical verts/normals/indices; injected a resized duck via worldpack successfully). bpy UI untested in this environment — verify axis convention + anim key order in Blender on first use.
 - **Repacker SHIPPED (2026-07-07)**: `worldpack` + `repack` rebuild both containers (byte-identical round-trip; end-to-end mod verified). Modding is live.
 - Glide capture remains unnecessary.
 

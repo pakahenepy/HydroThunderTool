@@ -782,8 +782,17 @@ def worldpack(container, moddir, outpath):
             nmod += 1
         else:
             payload = data[a:a+b]
-        trailer = data[a+b:nxt]
-        struct.pack_into('<2I', hdr, recs[i][0], pos, len(payload))
+        trep = os.path.join(moddir, recs[i][4] + '.trailer.bin')
+        if os.path.isfile(trep):
+            trailer = open(trep, 'rb').read()
+        else:
+            trailer = data[a+b:nxt]
+        c = recs[i][3]
+        if len(trailer) >= 8:
+            tc = struct.unpack_from('<I', trailer, 4)[0]
+            if tc != c and 8 + tc*16 <= len(trailer):
+                c = tc
+        struct.pack_into('<3I', hdr, recs[i][0], pos, len(payload), c)
         out += payload + trailer
         pos += len(payload) + len(trailer)
     out[:len(hdr)] = hdr

@@ -22,6 +22,10 @@ asset archive.
 - **Animations & cameras** - A* keyframes -> JSON, D* demo camera scripts -> text
 - **Modding** - `worldpack` + `repack` rebuild the containers with your
   changes (byte-identical round-trip when unmodified)
+- **Blender add-on** - [hydro_blender.py](hydro_blender.py): import models
+  (textured, per-sub-part), whole tracks (world mesh + every prop placed),
+  and animations (keyframed sub-parts); export meshes back to game-ready
+  G records for `worldpack`
 
 ## Usage
 
