@@ -716,6 +716,37 @@ if IN_BLENDER:
             context.window_manager.invoke_search_popup(self)
             return {'FINISHED'}
 
+    class HYDRO_OT_play_all(bpy.types.Operator):
+        bl_idname = 'hydro.play_all'
+        bl_label = 'Animate Everything'
+        bl_description = ('Enable one animation on every animated object '
+                          'in the file (the first NLA track per object)')
+        def execute(self, context):
+            n = 0
+            for ob in bpy.data.objects:
+                ad = ob.animation_data
+                if not ad or not ad.nla_tracks:
+                    continue
+                first = sorted(tr.name for tr in ad.nla_tracks)[0]
+                for tr in ad.nla_tracks:
+                    tr.mute = (tr.name != first)
+                ob.matrix_parent_inverse.identity()
+                n += 1
+            self.report({'INFO'}, 'enabled animations on %d objects' % n)
+            return {'FINISHED'}
+
+    class HYDRO_OT_stop_all(bpy.types.Operator):
+        bl_idname = 'hydro.stop_all'
+        bl_label = 'Stop All Animations'
+        bl_description = 'Mute every Hydro NLA track in the file'
+        def execute(self, context):
+            for ob in bpy.data.objects:
+                ad = ob.animation_data
+                if ad:
+                    for tr in ad.nla_tracks:
+                        tr.mute = True
+            return {'FINISHED'}
+
     class HYDRO_OT_import_anim(bpy.types.Operator, ImportHelper):
         bl_idname = 'hydro.import_anim'
         bl_label = 'Import Hydro Anim (A*.bin) onto selected model root'
@@ -758,11 +789,15 @@ if IN_BLENDER:
             c.operator('hydro.import_anim', text='Import Anim (A)')
             c.separator()
             c.operator('hydro.set_anim', text='Play Animation...')
+            row = c.row(align=True)
+            row.operator('hydro.play_all', text='Animate Everything')
+            row.operator('hydro.stop_all', text='', icon='PAUSE')
             c.separator()
             c.operator('hydro.export_model', text='Export Model (G)')
 
     CLASSES = (HYDRO_OT_import_model, HYDRO_OT_import_track,
                HYDRO_OT_import_anim, HYDRO_OT_set_anim,
+               HYDRO_OT_play_all, HYDRO_OT_stop_all,
                HYDRO_OT_export_model, HYDRO_PT_panel)
 
     def register():
