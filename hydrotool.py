@@ -736,11 +736,178 @@ def cmd_all(args):
         cmd_tracks(Namespace(splitdir=splitdir, outdir=None))
         cmd_params(Namespace(splitdir=splitdir, outdir=None))
         cmd_cameras(Namespace(splitdir=splitdir, outdir=None))
+        cmd_anims(Namespace(splitdir=splitdir, outdir=None))
         cmd_sounds(Namespace(extractdir=outdir, outdir=None))
     else:
         print('world container not found in archive (skipped)')
 
 
+
+
+# ===========================================================================
+# repacking (modding support)
+# ===========================================================================
+
+def worldpack(container, moddir, outpath):
+    """Rebuild the world container, replacing any record whose <NAME>.bin
+    exists in moddir. Record payloads may change size; each record's
+    relocation trailer is preserved verbatim, and the record table is
+    rewritten. Byte-identical to the input when moddir is empty."""
+    data = open(container, 'rb').read()
+    table = struct.unpack_from('<I', data, 0x20)[0]
+    payload_base = struct.unpack_from('<I', data, 0x24)[0]
+    count = struct.unpack_from('<I', data, 0x2c)[0]
+    recs = []
+    for i in range(count):
+        o = table + i*0x4c
+        a, b, c = struct.unpack_from('<3I', data, o)
+        name = data[o+12:o+24].split(b'\x00')[0].decode('latin1')
+        fn = ''.join(ch if ch.isalnum() or ch in '_-' else '_' for ch in name)
+        recs.append([o, a, b, c, fn])
+    order = sorted(range(count), key=lambda i: recs[i][1])
+    # trailer of each record = bytes from payload end to next payload start
+    ends = []
+    for k, i in enumerate(order):
+        a, b = recs[i][1], recs[i][2]
+        nxt = recs[order[k+1]][1] if k+1 < len(order) else len(data)
+        ends.append((i, a, b, nxt))
+    out = bytearray(data[:payload_base])
+    hdr = bytearray(data[:table + count*0x4c])
+    nmod = 0
+    pos = payload_base
+    for i, a, b, nxt in ends:
+        rep = os.path.join(moddir, recs[i][4] + '.bin')
+        if os.path.isfile(rep):
+            payload = open(rep, 'rb').read()
+            nmod += 1
+        else:
+            payload = data[a:a+b]
+        trailer = data[a+b:nxt]
+        struct.pack_into('<2I', hdr, recs[i][0], pos, len(payload))
+        out += payload + trailer
+        pos += len(payload) + len(trailer)
+    out[:len(hdr)] = hdr
+    with open(outpath, 'wb') as f:
+        f.write(out)
+    return nmod, len(out)
+
+
+def cmd_worldpack(args):
+    nmod, size = worldpack(args.container, args.moddir, args.output)
+    print(f'{nmod} records replaced -> {args.output} ({size} bytes)')
+
+
+def fsd_repack(archive, moddir, outpath, names):
+    """Rebuild an FSD archive. Files in moddir (matched by their extract
+    path, e.g. data/textures/loading.egf or <hash>.bin) replace originals
+    and are stored raw. Unmodified files are copied verbatim (compressed
+    blocks included). Byte-identical when moddir is empty."""
+    data = open(archive, 'rb').read()
+    dirbytes = bytearray(data[:BLOCK_TABLE_OFFSET])
+    blktab = list(struct.unpack_from('<%dI' % BLOCK_TABLE_SLOTS, data,
+                                     BLOCK_TABLE_OFFSET))
+    entries = []
+    for i in range(DIR_SLOTS):
+        h, off, size, blk = struct.unpack_from('<4I', data, DIR_OFFSET + i*16)
+        if h or off or size or blk:
+            entries.append([i, h, off, size, blk])
+    def blocks_of(off, size, blk):
+        n = (size + BLOCK_USIZE - 1) // BLOCK_USIZE
+        return list(range(blk, blk + n))
+    out = bytearray(0x28004)
+    pos = len(out)
+    nmod = 0
+    for e in sorted(entries, key=lambda e: e[2]):
+        i, h, off, size, blk = e
+        rel = names.get(h)
+        rep = None
+        for cand in ([os.path.join(moddir, rel)] if rel else []) + [
+                os.path.join(moddir, '%08x.bin' % h)]:
+            if cand and os.path.isfile(cand):
+                rep = cand
+                break
+        if rep:
+            buf = open(rep, 'rb').read()
+            struct.pack_into('<4I', dirbytes, DIR_OFFSET + i*16,
+                             h, pos, len(buf), 0)
+            out += buf
+            pos += len(buf)
+            nmod += 1
+        elif blk == 0:
+            struct.pack_into('<I', dirbytes, DIR_OFFSET + i*16 + 4, pos)
+            out += data[off:off+size]
+            pos += size
+        else:
+            struct.pack_into('<I', dirbytes, DIR_OFFSET + i*16 + 4, pos)
+            for bi in blocks_of(off, size, blk):
+                bo = blktab[bi]
+                csize = struct.unpack_from('<I', data, bo + 4)[0]
+                blktab[bi] = pos
+                out += data[bo:bo+csize]
+                pos += csize
+    # EOF sentinel: first unused trailing entry points at end of data
+    used = max(max(blocks_of(e[2], e[3], e[4])) for e in entries if e[4])
+    blktab[used + 1] = pos
+    out[:BLOCK_TABLE_OFFSET] = dirbytes
+    struct.pack_into('<%dI' % BLOCK_TABLE_SLOTS, out, BLOCK_TABLE_OFFSET,
+                     *blktab)
+    with open(outpath, 'wb') as f:
+        f.write(out)
+    return nmod, len(out)
+
+
+def cmd_repack(args):
+    names = {}
+    db = load_name_db(args.archive)
+    for h, p in db.items():
+        rel = p.split(':', 1)[-1].lstrip(chr(92)).replace(chr(92), os.sep)
+        names[h] = rel.lower()
+    nmod, size = fsd_repack(args.archive, args.moddir, args.output, names)
+    print(f'{nmod} files replaced -> {args.output} ({size} bytes)')
+
+
+# ===========================================================================
+# A* prop keyframe animations
+# ===========================================================================
+#
+# A-record: u24 size+'A', u16 frame count, u16 bone count, f32 frame dt
+# (1/30, 1/15, 0.2...), u32 ?, u32 ?, then keyframe records of 108 bytes
+# (one per bone per frame, bone-major within frame): two {3x3 scaled
+# rotation, f32x3 translation} blocks + {1.0, 1.0, 0.0} tail; some files
+# carry one extra {u32, u32} pair after the first record. The first block
+# is the bone's world transform for the frame; the second block's role
+# (tangent/parent/bind?) is not yet pinned down -- both are preserved in
+# the dump.
+
+def cmd_anims(args):
+    import json
+    src = args.splitdir
+    outdir = args.outdir or os.path.join(src, '_anims')
+    os.makedirs(outdir, exist_ok=True)
+    n = 0
+    for f in sorted(glob.glob(os.path.join(src, 'A*.bin'))):
+        d = open(f, 'rb').read()
+        if d[3:4] != b'A':
+            continue
+        name = os.path.splitext(os.path.basename(f))[0]
+        nframes, nbones = struct.unpack_from('<2H', d, 4)
+        dt = struct.unpack_from('<f', d, 8)[0]
+        u1, u2 = struct.unpack_from('<2I', d, 0xc)
+        recs = []
+        pos = 0x14
+        while pos + 108 <= len(d):
+            v = struct.unpack_from('<27f', d, pos)
+            if v[24] != 1.0 or v[25] != 1.0:      # lost sync (extra u32 pair)
+                pos += 4
+                continue
+            recs.append({'m1': [round(x, 6) for x in v[:12]],
+                         'm2': [round(x, 6) for x in v[12:24]]})
+            pos += 108
+        with open(os.path.join(outdir, name + '.json'), 'w') as out:
+            json.dump({'frames': nframes, 'bones': nbones, 'dt': dt,
+                       'u1': u1, 'u2': u2, 'keys': recs}, out, indent=0)
+        n += 1
+    print(f'{n} animations -> {outdir}/')
 
 
 # ===========================================================================
@@ -1209,6 +1376,25 @@ def main():
                    '(out/bc0abcfa.bin)')
     p.add_argument('-o', '--outdir', help='output dir (default: <worldfile>_split)')
     p.set_defaults(func=cmd_world)
+
+    p = sub.add_parser('worldpack', help='rebuild the world container with '
+                       'replaced records (modding)')
+    p.add_argument('container', help='original bc0abcfa.bin')
+    p.add_argument('moddir', help='directory of replacement <NAME>.bin records')
+    p.add_argument('-o', '--output', required=True, help='output container')
+    p.set_defaults(func=cmd_worldpack)
+
+    p = sub.add_parser('repack', help='rebuild Hydro.fsd with replaced files '
+                       '(modding); replacements are stored uncompressed')
+    p.add_argument('archive', help='original Hydro.fsd')
+    p.add_argument('moddir', help='directory of replacement files (extract layout)')
+    p.add_argument('-o', '--output', required=True, help='output .fsd')
+    p.set_defaults(func=cmd_repack)
+
+    p = sub.add_parser('anims', help='dump A* prop keyframe animations to JSON')
+    p.add_argument('splitdir', help='a world _split directory')
+    p.add_argument('-o', '--outdir', help='output dir (default: <splitdir>/_anims)')
+    p.set_defaults(func=cmd_anims)
 
     p = sub.add_parser('cameras', help='dump D* demo camera cut lists to text')
     p.add_argument('splitdir', help='a world _split directory')

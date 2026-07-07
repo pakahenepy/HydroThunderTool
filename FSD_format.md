@@ -113,7 +113,7 @@ Notes:
 ### Other world-container types (surveyed 2026-07-02)
 
 - **B\*** = loading screens, fully decoded: 16-byte header `u24 size+'B', u32 2, u32 w, u32 h, u32 2` then w·h ARGB1555 bottom-up. 13 track banners (640×132/162/186) + 3 full 640×480 (Eurocom logo etc). `hydrotool.py world` exports them.
-- **A\*** = keyframe animations for ambient props (PENGuin, BEAR, HELIcopter, KAYAk, ORCA…): header has f32 1/30 (frame time) + count dwords, body = 4×4 float matrices. Not decoded further.
+- **A\*** = keyframe animations for ambient props (PENGuin, BEAR, HELIcopter, KAYAk, ORCA…), MOSTLY DECODED (2026-07-07): u16 frame count + u16 bone count @+4, f32 frame dt @+8, two u32s, then 108-byte keyframe records (bone-major per frame): two {3×3 scaled-rotation, f32×3 translation} blocks + {1.0, 1.0, 0.0} tail (some files insert one extra {u32,u32} pair after the first record). Block 1 = the bone's transform for the frame; block 2's role (interp tangent / parent / bind pose?) unconfirmed. `hydrotool.py anims` dumps all 84 to JSON.
 - **D\*** = demo/credits camera scripts, DECODED (2026-07-07): u32 record count @+4, then `{u32 time_s, f32 x, char camera[12], u32 nparams, f32 params[n]}` — a timed cut list for the attract-mode director. Camera modes: `DOLLY_TARGET`(5 params), `ESPN_CAMERA`(3), `GAMECAMERA1-3`(1), `TARGET_SWIVEL`(6), `CIRCLING_CAM`(7: orbit radius/height/speed/dir…), `STATIONARY_`(2), `MOUNTED_CAM`/`MOUNTED_SWIVEL`(8), `CHASING_CAM`(6), `DOLLY_CAMERA`(4), `SCROLL_CREDITS`(2); last param is usually FOV (90). `HIGH_SCORE_ {1,n}/{0,n}` toggles the high-score overlay. Same declared-size undercut as P records (final float spills into the trailer; split keeps slack). `hydrotool.py cameras` dumps them to `_cameras/*.txt`.
 - **H\*** = the per-track SCENE files (`H<track>T<name>TRH0`, one per track + menu scenes `HWTBTS_` boat-select / `HWTCRED` credits / `HWTHISC` high-score / `H_TMASS`). Partially mapped (2026-07-06):
   - Header: u32 sector count @+4 (8/16), then sectors ×20B `{u32 node-list ptr*, f32 x, f32 y(=water level, e.g. 211), f32 z, u32 flags}` — positions trace the course sequentially = **checkpoint/progress waypoints**. Then a master header (@0x148 for ARCT): ~13 u32 counts + ~20 relocated section pointers.
@@ -178,3 +178,12 @@ Every world-container record is followed by: `FD FD FD FD` marker, u32 entry cou
 `world_split` now saves the named entries to `relocs.json`, and `models` uses them to emit `.mtl` files (`map_Kd ../_textures/<name>.png`) with `usemtl` per surface. Material record (44 bytes, rel +4): u16 flags, u16 tri_start, u32 tri_count, u32 0, f32 uv-scale?, f32 uv-scale?, u32 texture-pointer slot (+0x14, patched via reloc), f32×4 RGBA color (+0x18), u32 color-table idx (+0x28).
 
 Not palettes. Format: u24 size + `'P'`, u32 1, u32 param_count, then params back to back: `name\0` + u8 type + value, where type 0 = `\0`-terminated string, type 1 = float32. E.g. `PBBBANSHUP0` → `SELECT_BOAT = Banshee`, `MASS = 14854.9`, `GRAVITY_MIN = 200`, drag/buoyancy/handling tables (129 params). 42 files = 13 boats × 2 tuning variants + per-track boat variants (`P?X*HUH0/1`). Caveat: the declared record size systematically undercuts the last float by ~2 bytes (it spills into the 0xCD inter-record fill) — parse by count, not size. `hydrotool.py params <splitdir>` dumps them all to text.
+
+## Repacking (modding)
+
+Both containers rebuild **byte-identically** from parsed structures when nothing is modified (verified by SHA-256), so the writers are provably faithful:
+
+- `hydrotool.py worldpack <bc0abcfa.bin> <moddir> -o new.bin` — replaces any world record whose `<NAME>.bin` exists in moddir (records may change size; relocation trailers are preserved; the record table is rewritten).
+- `hydrotool.py repack <Hydro.fsd> <moddir> -o new.fsd` — replaces any FSD file matched by extract path (`data/textures/loading.egf`, `sound/5.esf`, `bc0abcfa.bin`, or `<hash>.bin`); replacements are stored uncompressed (the format allows raw storage — no EDL compressor needed).
+
+Verified end-to-end: doubling the Banshee's `MASS` in `PBBBANSHUP0`, worldpack → repack → re-extract reproduces the change with all 4,588 records intact. Typical mod loop: edit a split record `.bin` (physics floats, texture pixels, placement nodes at documented offsets) → `worldpack` → `repack` → run the game.

@@ -19,6 +19,9 @@ asset archive.
 - **Boat physics** — `P*` parameter records → readable text (mass, drag,
   buoyancy, handling for all 13 boats)
 - **Audio** - all 459 ESF sounds + music -> 16-bit WAV (IMA ADPCM)
+- **Animations & cameras** - A* keyframes -> JSON, D* demo camera scripts -> text
+- **Modding** - `worldpack` + `repack` rebuild the containers with your
+  changes (byte-identical round-trip when unmodified)
 
 ## Usage
 
