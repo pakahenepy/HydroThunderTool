@@ -10,8 +10,11 @@
 #                   empty, textured materials, per-corner normals.
 #   Import Track  - any H*.bin: world mesh + every prop placement instanced
 #                   (collection instances), one click per track.
-#   Import Anim   - any A*.bin onto the selected model root: keyframes each
-#                   sub-part (bones == sub-parts, rigid hierarchy animation).
+#   Import Anim   - any A*.bin onto the selected model root: bakes each
+#                   sub-part into a Blender Action (bones == sub-parts,
+#                   rigid hierarchy animation). Actions are stored in
+#                   bpy.data.actions with use_fake_user=True and picked
+#                   from Play Animation... in the panel.
 #   Export Model  - selected mesh objects -> a game-ready G record
 #                   (<NAME>.bin + <NAME>.trailer.bin) for `hydrotool.py
 #                   worldpack`. Materials named after a texture resource
@@ -475,33 +478,39 @@ if IN_BLENDER:
             inst.scale = (scale,) * 3
             scn.collection.objects.link(inst)
 
+    # ---- Option C: Action-based animation --------------------------------
+    #
+    # Each imported A*.bin becomes N Blender Actions (one per sub-part),
+    # named "<anim>.<obj_name>" and tagged with act['hydro_anim'] = <anim>.
+    # Actions are kept alive across save/reload via use_fake_user=True.
+    # "Play Animation..." assigns the matching action per sub-part, which
+    # tags the depsgraph and shows up in the Dope Sheet immediately.
+    # No NLA tracks are created; press Space to actually play.
+
     def _key_object(ob, anim_name, frames):
-        """Bake (frame, Matrix) list into a muted NLA track on ob."""
+        """Bake (frame, Matrix) list into an Action in bpy.data.actions.
+        Does NOT create NLA tracks. Action name = '<anim>.<obj>'."""
+        act_name = '%s.%s' % (anim_name, ob.name)
+        old = bpy.data.actions.get(act_name)
+        if old:
+            bpy.data.actions.remove(old)            # replace previous bake
+        act = bpy.data.actions.new(act_name)
+        act.use_fake_user = True                    # survive save/reload
+        act['hydro_anim'] = anim_name               # tag for enum lookup
+
         rest_basis = ob.matrix_basis.copy()
         rest_pinv = ob.matrix_parent_inverse.copy()
         ad = ob.animation_data_create()
-        act = bpy.data.actions.new('%s.%s' % (anim_name, ob.name))
-        ad.action = act
+        prev_action = ad.action
+        ad.action = act                             # keyframe_insert -> act
+        ob.matrix_parent_inverse.identity()
         for f, mat in frames:
-            ob.matrix_parent_inverse.identity()
             ob.matrix_basis = mat
             ob.keyframe_insert('location', frame=f)
             ob.keyframe_insert('rotation_euler', frame=f)
             ob.keyframe_insert('scale', frame=f)
-        try:
-            ad.action = None
-        except Exception:
-            pass
-        track = ad.nla_tracks.new()
-        track.name = anim_name
-        track.mute = True
-        strip = track.strips.new(anim_name, 1, act)
-        if hasattr(strip, 'action_slot') and getattr(act, 'slots', None):
-            try:
-                strip.action_slot = act.slots[0]
-            except Exception:
-                pass
-        ob.matrix_basis = rest_basis                # restore rest pose
+        ad.action = prev_action                     # restore rest pose
+        ob.matrix_basis = rest_basis
         ob.matrix_parent_inverse = rest_pinv
 
     def _mat4(blk):
@@ -512,7 +521,7 @@ if IN_BLENDER:
                        (m[0][2], m[1][2], m[2][2], t[2]),
                        (0, 0, 0, 1)))
 
-    def import_anim(binpath, root, as_nla=True):
+    def import_anim(binpath, root):
         anim_name = os.path.splitext(os.path.basename(binpath))[0]
         nframes, nbones, dt, binds, keys = parse_anim(
             open(binpath, 'rb').read())
@@ -523,6 +532,8 @@ if IN_BLENDER:
         scn.frame_end = max(scn.frame_end, nframes)
         targets = parts if (nbones > 1 and parts) else [root]
         inv_bind = []
+        # 90-degree right (clockwise) rotation around the Game's Y-axis (Yaw)
+        yaw_rot = Matrix.Rotation(math.radians(0), 4, 'Y')
         for b in range(nbones):
             if b < len(binds):
                 inv_bind.append(_mat4(binds[b][0]).inverted_safe())
@@ -535,12 +546,13 @@ if IN_BLENDER:
                 if k >= len(keys):
                     break
                 mat = _mat4(keys[k][0]) @ inv_bind[bidx]
+                mat = yaw_rot @ mat             # apply yaw fix
                 per_ob[targets[bidx]].append((f + 1, mat))
         for ob, frames in per_ob.items():
             if frames:
                 _key_object(ob, anim_name, frames)
-        if not as_nla:
-            set_animation(root, anim_name)
+        # Actions are stored but NOT assigned; user picks one via Play
+        # Animation... in the panel, or hits Animate Everything.
 
     def _anim_objects(root):
         if root.instance_type == 'COLLECTION' and root.instance_collection:
@@ -552,26 +564,33 @@ if IN_BLENDER:
             yield ob
 
     def set_animation(root, anim_name):
-        """Unmute NLA tracks named anim_name under root; mute the rest.
-        anim_name None/'' = static pose."""
+        """Assign the '<anim_name>.<obj>' action to every animated sub-object
+        under root. anim_name None/'' clears the action (static pose)."""
         for ob in _anim_objects(root):
-            ad = ob.animation_data
-            if not ad:
+            ad = ob.animation_data or ob.animation_data_create()
+            if not anim_name:
+                ad.action = None
                 continue
-            for tr in ad.nla_tracks:
-                tr.mute = (tr.name != anim_name)
-            if anim_name:
-                for tr in ad.nla_tracks:
-                    if tr.name == anim_name:
-                        ob.matrix_parent_inverse.identity()
+            act = bpy.data.actions.get('%s.%s' % (anim_name, ob.name))
+            if act:
+                ad.action = act
+                ob.matrix_parent_inverse.identity()
+            else:
+                ad.action = None                # this obj has no clip here
 
     def anim_names(root):
+        """Distinct hydro_anim tags whose bake targets this root's parts."""
         names = []
-        for ob in _anim_objects(root):
-            if ob.animation_data:
-                for tr in ob.animation_data.nla_tracks:
-                    if tr.name not in names:
-                        names.append(tr.name)
+        seen = set()
+        obj_names = {ob.name for ob in _anim_objects(root)}
+        for act in bpy.data.actions:
+            tag = act.get('hydro_anim')
+            if not tag or tag in seen:
+                continue
+            suffix = act.name.split('.', 1)[-1]
+            if suffix in obj_names:
+                names.append(tag)
+                seen.add(tag)
         return names
 
     def export_model(objs, outpath):
@@ -656,8 +675,8 @@ if IN_BLENDER:
                                             options={'HIDDEN'})
         import_anims: bpy.props.BoolProperty(
             name='Import animations', default=True,
-            description='Also import matching A* animations as toggleable '
-                        'NLA tracks (use Play Animation in the panel)')
+            description='Also bake matching A* animations as Blender '
+                        'Actions (pick one via Play Animation in the panel)')
         def execute(self, context):
             paths = [os.path.join(self.directory, f.name)
                      for f in self.files if f.name] or [self.filepath]
@@ -699,7 +718,7 @@ if IN_BLENDER:
         return ob
 
     def _anim_items(self, context):
-        items = [('__none__', '(static)', 'mute all animations')]
+        items = [('__none__', '(static)', 'clear all Hydro actions')]
         ob = context.active_object
         if ob:
             for n in anim_names(_root_of(ob)):
@@ -726,32 +745,34 @@ if IN_BLENDER:
     class HYDRO_OT_play_all(bpy.types.Operator):
         bl_idname = 'hydro.play_all'
         bl_label = 'Animate Everything'
-        bl_description = ('Enable one animation on every animated object '
-                          'in the file (the first NLA track per object)')
+        bl_description = ('Assign one Hydro action to every object in the '
+                          'file that has a baked hydro_anim action')
         def execute(self, context):
             n = 0
             for ob in bpy.data.objects:
-                ad = ob.animation_data
-                if not ad or not ad.nla_tracks:
+                # find any hydro_anim-tagged action whose name ends in .<ob>
+                suffix = '.' + ob.name
+                cands = [a for a in bpy.data.actions
+                         if a.get('hydro_anim') and a.name.endswith(suffix)]
+                if not cands:
                     continue
-                first = sorted(tr.name for tr in ad.nla_tracks)[0]
-                for tr in ad.nla_tracks:
-                    tr.mute = (tr.name != first)
+                cands.sort(key=lambda a: a.name)
+                ad = ob.animation_data or ob.animation_data_create()
+                ad.action = cands[0]
                 ob.matrix_parent_inverse.identity()
                 n += 1
-            self.report({'INFO'}, 'enabled animations on %d objects' % n)
+            self.report({'INFO'}, 'assigned actions to %d objects' % n)
             return {'FINISHED'}
 
     class HYDRO_OT_stop_all(bpy.types.Operator):
         bl_idname = 'hydro.stop_all'
         bl_label = 'Stop All Animations'
-        bl_description = 'Mute every Hydro NLA track in the file'
+        bl_description = 'Clear the assigned action on every animated object'
         def execute(self, context):
             for ob in bpy.data.objects:
                 ad = ob.animation_data
                 if ad:
-                    for tr in ad.nla_tracks:
-                        tr.mute = True
+                    ad.action = None
             return {'FINISHED'}
 
     class HYDRO_OT_import_anim(bpy.types.Operator, ImportHelper):
@@ -771,7 +792,10 @@ if IN_BLENDER:
                 return {'CANCELLED'}
             while root.parent:
                 root = root.parent
-            import_anim(self.filepath, root, as_nla=False)
+            import_anim(self.filepath, root)
+            # auto-assign the just-imported clip so the user sees it play
+            anim_name = os.path.splitext(base)[0]
+            set_animation(root, anim_name)
             return {'FINISHED'}
 
     class HYDRO_OT_export_model(bpy.types.Operator, ExportHelper):
