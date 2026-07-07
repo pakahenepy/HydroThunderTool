@@ -472,7 +472,7 @@ def world_split(data, outdir):
         fn = ''.join(ch if ch.isalnum() or ch in '_-' else '_' for ch in name)
         # P records' declared size can undercut the last float32 by a couple
         # of bytes (spills into the trailer); keep 4 bytes of slack for those.
-        slack = 4 if name[:1] in ('P', 'D') else 0
+        slack = 4 if name[:1] in ('P', 'D', 'A') else 0
         with open(os.path.join(outdir, fn + '.bin'), 'wb') as f:
             f.write(data[a:a+b+slack])
         if c and struct.unpack_from('<I', data, a+b+4)[0] == c:
