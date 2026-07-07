@@ -15,12 +15,14 @@ Works straight from Hydro.fsd. Subcommands:
   models    Export all G* geometry records to OBJ (verts + UVs + surface
             groups). Run on a world _split directory.
   params    Dump P* boat physics parameter records to readable text.
+  sounds    Decode all ESF sounds + music to 16-bit mono WAV.
   all       everything in one shot: extract, textures, world split (with
-            _textures/ and _screens/), models, tracks, and params.
+            _textures/ and _screens/), models, tracks, params, and sounds.
 
 Every command takes -o/--outdir to choose the output directory. Defaults:
   extract/all -> <archive>_out/         world  -> <worldfile>_split/
   models      -> <splitdir>/_models/    params -> <splitdir>/_params/
+  sounds      -> <extractdir>/sounds/wav/
   textures decodes in place, next to each .egf.
 
 Examples (a full run from scratch):
@@ -733,10 +735,80 @@ def cmd_all(args):
         cmd_models(Namespace(splitdir=splitdir, outdir=None))
         cmd_tracks(Namespace(splitdir=splitdir, outdir=None))
         cmd_params(Namespace(splitdir=splitdir, outdir=None))
+        cmd_sounds(Namespace(extractdir=outdir, outdir=None))
     else:
         print('world container not found in archive (skipped)')
 
 
+
+
+# ===========================================================================
+# ESF sounds -> WAV
+# ===========================================================================
+#
+# "ESF" + u8 version (8 here) + u32: low 24 bits = decoded PCM byte count,
+# top byte flags: 0x80 = DVI IMA ADPCM (else raw PCM16), 0x40 = loop,
+# 0x20 = 22050 Hz (else 11025), 0x10 = 16-bit. Mono. 4-bit IMA nibbles,
+# high nibble first; standard step/index tables (exe decoder @0x46a6b0;
+# format cross-checked against vgmstream's esf.c).
+
+IMA_STEPS = [
+    7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,
+    73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,337,371,
+    408,449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,1552,1707,
+    1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,
+    7132,7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,
+    22385,24623,27086,29794,32767]
+IMA_INDEX = [-1,-1,-1,-1,2,4,6,8]
+
+
+def esf_to_wav(path, out):
+    """Decode one ESF (v8, mono IMA ADPCM) to a 16-bit WAV. Returns
+    (samples, rate) or None."""
+    import wave
+    d = open(path, 'rb').read()
+    if d[:4] != b'ESF' + bytes([8]):
+        return None
+    info = struct.unpack_from('<I', d, 4)[0]
+    flags = info >> 24
+    if not flags & 0x80:
+        return None                          # raw PCM variant (unused here)
+    rate = 22050 if flags & 0x20 else 11025
+    sample = 0
+    index = 0
+    pcm = bytearray()
+    for b in d[8:]:
+        for nib in (b >> 4, b & 0xF):        # high nibble first
+            step = IMA_STEPS[index]
+            diff = step >> 3
+            if nib & 4: diff += step
+            if nib & 2: diff += step >> 1
+            if nib & 1: diff += step >> 2
+            if nib & 8: sample -= diff
+            else:       sample += diff
+            sample = max(-32768, min(32767, sample))
+            index = max(0, min(88, index + IMA_INDEX[nib & 7]))
+            pcm += struct.pack('<h', sample)
+    with wave.open(out, 'wb') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(bytes(pcm))
+    return len(pcm) // 2, rate
+
+
+def cmd_sounds(args):
+    src = args.extractdir
+    outdir = args.outdir or os.path.join(src, 'sounds', 'wav')
+    n = 0
+    for f in sorted(glob.glob(os.path.join(src, '**', '*.esf'),
+                              recursive=True)):
+        rel = os.path.relpath(f, src)
+        dest = os.path.join(outdir, os.path.splitext(rel)[0] + '.wav')
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        if esf_to_wav(f, dest):
+            n += 1
+    print(f'{n} sounds -> {outdir}/')
 
 
 # ===========================================================================
@@ -1092,6 +1164,11 @@ def main():
                    '(out/bc0abcfa.bin)')
     p.add_argument('-o', '--outdir', help='output dir (default: <worldfile>_split)')
     p.set_defaults(func=cmd_world)
+
+    p = sub.add_parser('sounds', help='decode all ESF sounds/music to WAV')
+    p.add_argument('extractdir', help='an extract output dir (contains sound/, wavmusic/)')
+    p.add_argument('-o', '--outdir', help='output dir (default: <extractdir>/sounds/wav)')
+    p.set_defaults(func=cmd_sounds)
 
     p = sub.add_parser('tracks', help='export H* track scenes: embedded world '
                        'mesh to OBJ+MTL')
