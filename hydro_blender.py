@@ -530,19 +530,42 @@ if IN_BLENDER:
         bl_idname = 'hydro.import_model'
         bl_label = 'Import Hydro Model (G*.bin)'
         filename_ext = '.bin'
-        filter_glob: bpy.props.StringProperty(default='G*.bin;g*.bin',
+        filter_glob: bpy.props.StringProperty(default='*.bin',
                                               options={'HIDDEN'})
+        files: bpy.props.CollectionProperty(
+            type=bpy.types.OperatorFileListElement, options={'HIDDEN'})
+        directory: bpy.props.StringProperty(subtype='DIR_PATH',
+                                            options={'HIDDEN'})
         def execute(self, context):
-            import_model(self.filepath)
+            paths = [os.path.join(self.directory, f.name)
+                     for f in self.files if f.name] or [self.filepath]
+            done = 0
+            for p in paths:
+                base = os.path.basename(p)
+                if not base[:1].upper() == 'G':
+                    self.report({'WARNING'}, base + ' is not a G model')
+                    continue
+                try:
+                    import_model(p)
+                    done += 1
+                except Exception as e:
+                    self.report({'WARNING'}, '%s: %s' % (base, e))
+            if not done:
+                return {'CANCELLED'}
+            self.report({'INFO'}, 'imported %d model(s)' % done)
             return {'FINISHED'}
 
     class HYDRO_OT_import_track(bpy.types.Operator, ImportHelper):
         bl_idname = 'hydro.import_track'
         bl_label = 'Import Hydro Track (H*.bin)'
         filename_ext = '.bin'
-        filter_glob: bpy.props.StringProperty(default='H*.bin',
+        filter_glob: bpy.props.StringProperty(default='*.bin',
                                               options={'HIDDEN'})
         def execute(self, context):
+            base = os.path.basename(self.filepath)
+            if not base[:1].upper() == 'H':
+                self.report({'ERROR'}, base + ' is not an H track scene')
+                return {'CANCELLED'}
             import_track(self.filepath)
             return {'FINISHED'}
 
@@ -550,9 +573,13 @@ if IN_BLENDER:
         bl_idname = 'hydro.import_anim'
         bl_label = 'Import Hydro Anim (A*.bin) onto selected model root'
         filename_ext = '.bin'
-        filter_glob: bpy.props.StringProperty(default='A*.bin',
+        filter_glob: bpy.props.StringProperty(default='*.bin',
                                               options={'HIDDEN'})
         def execute(self, context):
+            base = os.path.basename(self.filepath)
+            if not base[:1].upper() == 'A':
+                self.report({'ERROR'}, base + ' is not an A animation')
+                return {'CANCELLED'}
             root = context.active_object
             if root is None:
                 self.report({'ERROR'}, 'select the model root empty first')
