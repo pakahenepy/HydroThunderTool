@@ -457,10 +457,14 @@ if IN_BLENDER:
                 path = os.path.join(splitdir, model + '.bin')
                 if os.path.isfile(path):
                     import_model(path, mcoll, with_anims=True)
+                # hide (eye) rather than exclude: excluded collections
+                # drop out of the depsgraph and their animations never
+                # evaluate during playback (instances would freeze)
                 lc = bpy.context.view_layer.layer_collection.children.get(
                     'Hydro Sources')
                 if lc:
-                    lc.exclude = True
+                    lc.exclude = False
+                    lc.hide_viewport = True
                 cache[model] = mcoll
             inst = bpy.data.objects.new('%s_%s' % (tag or 'node', model),
                                         None)
