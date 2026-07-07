@@ -360,7 +360,10 @@ if IN_BLENDER:
             for p, ui in zip(me.polygons, face_uv):
                 for li, u in zip(p.loop_indices, ui):
                     if u < len(uvs):
-                        uvl.data[li].uv = (uvs[u][0], 1.0 - uvs[u][1])
+                        # game v maps to Blender Y directly: the PNGs are
+                        # written bottom-up, which already matches Blender's
+                        # bottom-left UV origin
+                        uvl.data[li].uv = (uvs[u][0], uvs[u][1])
         if norms:
             loops = []
             for p, ni in zip(me.polygons, face_no):
@@ -472,7 +475,7 @@ if IN_BLENDER:
                 verts.append(key)
             return vmap[key]
         def uid(uv):
-            key = (round(uv[0], 5), round(1.0 - uv[1], 5))
+            key = (round(uv[0], 5), round(uv[1], 5))
             if key not in umap:
                 umap[key] = len(uvs)
                 uvs.append(key)
