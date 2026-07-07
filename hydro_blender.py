@@ -434,13 +434,19 @@ if IN_BLENDER:
         for (model, tag, x, y, z, yaw, scale) in parse_h_nodes(d, texrefs):
             model = canon.get(model.upper(), model)
             if model not in cache:
+                srcs = bpy.data.collections.get('Hydro Sources')
+                if not srcs:
+                    srcs = bpy.data.collections.new('Hydro Sources')
+                    scn.collection.children.link(srcs)
                 mcoll = bpy.data.collections.new(model)
-                scn.collection.children.link(mcoll)
+                srcs.children.link(mcoll)
                 path = os.path.join(splitdir, model + '.bin')
                 if os.path.isfile(path):
                     import_model(path, mcoll, with_anims=True)
-                bpy.context.view_layer.layer_collection.children[
-                    mcoll.name].exclude = True
+                lc = bpy.context.view_layer.layer_collection.children.get(
+                    'Hydro Sources')
+                if lc:
+                    lc.exclude = True
                 cache[model] = mcoll
             inst = bpy.data.objects.new('%s_%s' % (tag or 'node', model),
                                         None)
@@ -453,6 +459,8 @@ if IN_BLENDER:
 
     def _key_object(ob, anim_name, frames):
         """Bake (frame, Matrix) list into a muted NLA track on ob."""
+        rest_basis = ob.matrix_basis.copy()
+        rest_pinv = ob.matrix_parent_inverse.copy()
         ad = ob.animation_data_create()
         act = bpy.data.actions.new('%s.%s' % (anim_name, ob.name))
         ad.action = act
@@ -469,7 +477,14 @@ if IN_BLENDER:
         track = ad.nla_tracks.new()
         track.name = anim_name
         track.mute = True
-        track.strips.new(anim_name, 1, act)
+        strip = track.strips.new(anim_name, 1, act)
+        if hasattr(strip, 'action_slot') and getattr(act, 'slots', None):
+            try:
+                strip.action_slot = act.slots[0]
+            except Exception:
+                pass
+        ob.matrix_basis = rest_basis                # restore rest pose
+        ob.matrix_parent_inverse = rest_pinv
 
     def import_anim(binpath, root, as_nla=True):
         anim_name = os.path.splitext(os.path.basename(binpath))[0]
@@ -500,6 +515,10 @@ if IN_BLENDER:
             set_animation(root, anim_name)
 
     def _anim_objects(root):
+        if root.instance_type == 'COLLECTION' and root.instance_collection:
+            for ob in root.instance_collection.all_objects:
+                yield ob
+            return
         yield root
         for ob in root.children_recursive:
             yield ob
@@ -645,6 +664,8 @@ if IN_BLENDER:
             return {'FINISHED'}
 
     def _root_of(ob):
+        if ob.instance_type == 'COLLECTION' and ob.instance_collection:
+            return ob                       # resolved by _anim_objects
         while ob and ob.parent:
             ob = ob.parent
         return ob
