@@ -30,12 +30,18 @@ Works straight from Hydro.fsd. Subcommands:
             `mod` calls this internally -- use `mod` instead unless you're
             not touching anything inside the world container).
 
-Every command takes -o/--outdir to choose the output directory. Defaults:
-  extract/all -> <archive>_out/         world  -> <worldfile>_split/
-  models      -> <splitdir>/_models/    params -> <splitdir>/_params/
-  sounds      -> <extractdir>/sounds/wav/
-  retexture   -> <original-folder>/_mods/<same-name>
-  textures decodes in place, next to each .egf.
+The -o flag's meaning is shown in each command's usage line via its metavar,
+and is one of three kinds:
+  -o DIR   the command writes many files INTO a directory. Decoders/exporters:
+           extract, all (<archive>_out/); world (<worldfile>_split/); models,
+           tracks, params, cameras, anims (<splitdir>/_<cmd>/); sounds
+           (<extractdir>/sounds/wav/). -o is optional; the default is shown.
+  -o FILE  the command writes a single output file, and -o is REQUIRED:
+           worldpack (a container), repack/mod (a .fsd).
+  -o PATH  retexture accepts either a file or a directory; default is
+           <original-folder>/_mods/<same-name>.
+  (textures is the only command with no -o -- it writes each PNG in place,
+   next to the source .egf.)
 
 Examples (a full run from scratch):
   python3 hydrotool.py all Hydro.fsd -o out
@@ -1714,39 +1720,61 @@ def main():
         description='Hydro Thunder FSD archive tool (extract + decode)')
     sub = ap.add_subparsers(dest='cmd', required=True)
 
+    # Output-flag convention (shown in every usage line via the metavar):
+    #   -o DIR   -> the command writes many files INTO this directory
+    #   -o FILE  -> the command writes a single output FILE at this path
+    #   -o PATH  -> either is accepted (retexture only)
+    # `textures` is the sole command with no -o: it writes each PNG in place
+    # next to its source .egf.
+    def out_dir(parser, default):
+        parser.add_argument('-o', '--outdir', metavar='DIR',
+                            help='output directory (default: %s)' % default)
+
+    def out_file(parser, what):
+        parser.add_argument('-o', '--output', metavar='FILE', required=True,
+                            help='output %s (a single file)' % what)
+
     p = sub.add_parser('extract', help='unpack all files from the FSD')
-    p.add_argument('archive', help='path to Hydro.fsd')
-    p.add_argument('-o', '--outdir', help='output dir (default: <archive>_out)')
+    p.add_argument('archive', metavar='Hydro.fsd', help='path to Hydro.fsd')
+    out_dir(p, '<archive>_out/')
     p.set_defaults(func=lambda a: cmd_extract(a))
 
     p = sub.add_parser('all', help='extract + decode textures + split world')
-    p.add_argument('archive', help='path to Hydro.fsd')
-    p.add_argument('-o', '--outdir', help='output dir (default: <archive>_out)')
+    p.add_argument('archive', metavar='Hydro.fsd', help='path to Hydro.fsd')
+    out_dir(p, '<archive>_out/')
     p.set_defaults(func=cmd_all)
 
-    p = sub.add_parser('textures', help='decode EGF file(s) or a folder to PNG')
-    p.add_argument('dir', help='an .egf file or a directory to search')
+    p = sub.add_parser('textures', help='decode EGF file(s) to PNG in place '
+                       '(no -o: each PNG is written next to its .egf)')
+    p.add_argument('dir', metavar='EGF_OR_DIR',
+                   help='an .egf file, or a directory searched recursively '
+                        'for .egf files')
     p.set_defaults(func=cmd_textures)
 
     p = sub.add_parser('world', help='split world container + decode T* '
                        'textures and B* loading screens')
-    p.add_argument('worldfile', help='the large ABCD... resource from extract '
-                   '(out/bc0abcfa.bin)')
-    p.add_argument('-o', '--outdir', help='output dir (default: <worldfile>_split)')
+    p.add_argument('worldfile', metavar='bc0abcfa.bin',
+                   help='the large ABCD... resource from extract '
+                        '(out/bc0abcfa.bin)')
+    out_dir(p, '<worldfile>_split/')
     p.set_defaults(func=cmd_world)
 
-    p = sub.add_parser('worldpack', help='rebuild the world container with '
-                       'replaced records (modding)')
-    p.add_argument('container', help='original bc0abcfa.bin')
-    p.add_argument('moddir', help='directory of replacement <NAME>.bin records')
-    p.add_argument('-o', '--output', required=True, help='output container')
+    p = sub.add_parser('worldpack', help='(low-level; prefer `mod`) rebuild '
+                       'just the world container with replaced records')
+    p.add_argument('container', metavar='bc0abcfa.bin',
+                   help='original world container')
+    p.add_argument('moddir', metavar='MODS_DIR',
+                   help='directory of replacement <NAME>.bin records')
+    out_file(p, 'world container')
     p.set_defaults(func=cmd_worldpack)
 
-    p = sub.add_parser('repack', help='rebuild Hydro.fsd with replaced files '
-                       '(modding); replacements are stored uncompressed')
-    p.add_argument('archive', help='original Hydro.fsd')
-    p.add_argument('moddir', help='directory of replacement files (extract layout)')
-    p.add_argument('-o', '--output', required=True, help='output .fsd')
+    p = sub.add_parser('repack', help='(low-level; prefer `mod`) rebuild '
+                       'Hydro.fsd with replaced top-level files, stored '
+                       'uncompressed')
+    p.add_argument('archive', metavar='Hydro.fsd', help='original Hydro.fsd')
+    p.add_argument('moddir', metavar='MODS_DIR',
+                   help='directory of replacement files (extract-path layout)')
+    out_file(p, '.fsd archive')
     p.set_defaults(func=cmd_repack)
 
     p = sub.add_parser('mod', help='ONE-SHOT repack (recommended): rebuild '
@@ -1755,52 +1783,62 @@ def main():
                        'top-level file mods (data/textures/loading.egf, '
                        '...) side by side -- no manual worldpack+repack '
                        'two-step needed')
-    p.add_argument('archive', help='original Hydro.fsd')
-    p.add_argument('moddir', help='mods folder (world-record .bin/.trailer.bin '
-                   'files and/or top-level extract-path files, mixed)')
-    p.add_argument('-o', '--output', required=True, help='output .fsd')
+    p.add_argument('archive', metavar='Hydro.fsd', help='original Hydro.fsd')
+    p.add_argument('moddir', metavar='MODS_DIR',
+                   help='mods folder (world-record .bin/.trailer.bin files '
+                        'and/or top-level extract-path files, mixed)')
+    out_file(p, '.fsd archive')
     p.set_defaults(func=cmd_mod)
 
     p = sub.add_parser('retexture', help='re-encode an edited PNG back into '
                        'a T*/M*/B*/EGF texture record, ready for `mod`')
-    p.add_argument('original', help='the original texture .bin (from a world '
-                   '_split dir) or .egf file being replaced')
-    p.add_argument('png', help='edited PNG, same width/height as the decoded '
-                   'original (dimensions cannot change)')
-    p.add_argument('-o', '--output', help='output file or directory '
-                   '(default: <original-folder>/_mods/<same-name>)')
+    p.add_argument('original', metavar='ORIGINAL',
+                   help='the original texture .bin (from a world _split dir) '
+                        'or .egf file being replaced')
+    p.add_argument('png', metavar='EDITED.png',
+                   help='edited PNG, same width/height as the decoded '
+                        'original (dimensions cannot change)')
+    p.add_argument('-o', '--output', metavar='PATH',
+                   help='output file OR directory (default: '
+                        '<original-folder>/_mods/<same-name>)')
     p.set_defaults(func=cmd_retexture)
 
     p = sub.add_parser('anims', help='dump A* prop keyframe animations to JSON')
-    p.add_argument('splitdir', help='a world _split directory')
-    p.add_argument('-o', '--outdir', help='output dir (default: <splitdir>/_anims)')
+    p.add_argument('splitdir', metavar='SPLIT_DIR',
+                   help='a world _split directory')
+    out_dir(p, '<splitdir>/_anims/')
     p.set_defaults(func=cmd_anims)
 
     p = sub.add_parser('cameras', help='dump D* demo camera cut lists to text')
-    p.add_argument('splitdir', help='a world _split directory')
-    p.add_argument('-o', '--outdir', help='output dir (default: <splitdir>/_cameras)')
+    p.add_argument('splitdir', metavar='SPLIT_DIR',
+                   help='a world _split directory')
+    out_dir(p, '<splitdir>/_cameras/')
     p.set_defaults(func=cmd_cameras)
 
     p = sub.add_parser('sounds', help='decode all ESF sounds/music to WAV')
-    p.add_argument('extractdir', help='an extract output dir (contains sound/, wavmusic/)')
-    p.add_argument('-o', '--outdir', help='output dir (default: <extractdir>/sounds/wav)')
+    p.add_argument('extractdir', metavar='EXTRACT_DIR',
+                   help='an extract output dir (contains sound/, wavmusic/)')
+    out_dir(p, '<extractdir>/sounds/wav/')
     p.set_defaults(func=cmd_sounds)
 
     p = sub.add_parser('tracks', help='export H* track scenes: embedded world '
                        'mesh to OBJ+MTL')
-    p.add_argument('splitdir', help='a world _split directory')
-    p.add_argument('-o', '--outdir', help='output dir (default: <splitdir>/_tracks)')
+    p.add_argument('splitdir', metavar='SPLIT_DIR',
+                   help='a world _split directory')
+    out_dir(p, '<splitdir>/_tracks/')
     p.set_defaults(func=cmd_tracks)
 
     p = sub.add_parser('params', help='dump P* boat physics parameters to text')
-    p.add_argument('splitdir', help='a world _split directory')
-    p.add_argument('-o', '--outdir', help='output dir (default: <splitdir>/_params)')
+    p.add_argument('splitdir', metavar='SPLIT_DIR',
+                   help='a world _split directory')
+    out_dir(p, '<splitdir>/_params/')
     p.set_defaults(func=cmd_params)
 
     p = sub.add_parser('models', help='export all G* geometry records to OBJ '
                        '(verts + UVs + surface groups)')
-    p.add_argument('splitdir', help='a world _split directory')
-    p.add_argument('-o', '--outdir', help='output dir (default: <splitdir>/_models)')
+    p.add_argument('splitdir', metavar='SPLIT_DIR',
+                   help='a world _split directory')
+    out_dir(p, '<splitdir>/_models/')
     p.set_defaults(func=cmd_models)
 
     args = ap.parse_args()
