@@ -489,7 +489,18 @@ if IN_BLENDER:
 
     def _key_object(ob, anim_name, frames):
         """Bake (frame, Matrix) list into an Action in bpy.data.actions.
-        Does NOT create NLA tracks. Action name = '<anim>.<obj>'."""
+        Does NOT create NLA tracks. Action name = '<anim>.<obj>'.
+
+        Uses quaternion rotation with sign continuity between consecutive
+        keys, not Euler. Euler channels decoded independently per frame can
+        land on equivalent-but-different representations frame to frame
+        (e.g. (0,0,180) vs (180,180,0) -- same orientation, different
+        numbers); Blender linearly interpolates the raw numbers between
+        keyframes, which spins through the gap -- this is the "flips 90
+        degrees, then flips back the other way" jank. Quaternions have no
+        such ambiguity; their only degeneracy is q == -q (same rotation),
+        fixed here by negating a key whenever it would flip sign relative
+        to the previous one."""
         act_name = '%s.%s' % (anim_name, ob.name)
         old = bpy.data.actions.get(act_name)
         if old:
@@ -500,14 +511,22 @@ if IN_BLENDER:
 
         rest_basis = ob.matrix_basis.copy()
         rest_pinv = ob.matrix_parent_inverse.copy()
+        ob.rotation_mode = 'QUATERNION'
         ad = ob.animation_data_create()
         prev_action = ad.action
         ad.action = act                             # keyframe_insert -> act
         ob.matrix_parent_inverse.identity()
+        prev_quat = None
         for f, mat in frames:
-            ob.matrix_basis = mat
+            loc, quat, scale = mat.decompose()
+            if prev_quat is not None and prev_quat.dot(quat) < 0:
+                quat = -quat                        # keep continuity
+            prev_quat = quat
+            ob.location = loc
+            ob.rotation_quaternion = quat
+            ob.scale = scale
             ob.keyframe_insert('location', frame=f)
-            ob.keyframe_insert('rotation_euler', frame=f)
+            ob.keyframe_insert('rotation_quaternion', frame=f)
             ob.keyframe_insert('scale', frame=f)
         ad.action = prev_action                     # restore rest pose
         ob.matrix_basis = rest_basis
@@ -532,8 +551,6 @@ if IN_BLENDER:
         scn.frame_end = max(scn.frame_end, nframes)
         targets = parts if (nbones > 1 and parts) else [root]
         inv_bind = []
-        # 90-degree right (clockwise) rotation around the Game's Y-axis (Yaw)
-        yaw_rot = Matrix.Rotation(math.radians(0), 4, 'Y')
         for b in range(nbones):
             if b < len(binds):
                 inv_bind.append(_mat4(binds[b][0]).inverted_safe())
@@ -546,7 +563,6 @@ if IN_BLENDER:
                 if k >= len(keys):
                     break
                 mat = _mat4(keys[k][0]) @ inv_bind[bidx]
-                mat = yaw_rot @ mat             # apply yaw fix
                 per_ob[targets[bidx]].append((f + 1, mat))
         for ob, frames in per_ob.items():
             if frames:
