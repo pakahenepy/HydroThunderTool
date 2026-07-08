@@ -299,8 +299,15 @@ def _fill_buffer(large, what, total, num, bufsize):
 
 
 def edl1_decompress_block(src: bytes, max_out: int = 0x2000) -> bytes:
-    """Decompress one EDL1 block bitstream (12-byte header already stripped)."""
+    """Decompress one EDL1 block bitstream (12-byte header already stripped).
+
+    Perf note: `fill` mutates the reservoir (data/count/pos) via nonlocal
+    instead of returning a tuple, and the output length is tracked in `olen`
+    rather than calling len(out) per byte -- both are mechanical speedups
+    with identical behavior to the reference decoder."""
     out = bytearray()
+    append = out.append
+    olen = 0
     pos = 0
     size = len(src)
     data = 0
@@ -309,26 +316,27 @@ def edl1_decompress_block(src: bytes, max_out: int = 0x2000) -> bytes:
     small = [0]*0x600
     stack = 0   # last code-length nibble persists across tables and segments
 
-    def fill(d, c):
-        nonlocal pos
-        if c > 32 or c < 0:
-            return d, c
-        t = min(4, size - pos)
-        y = int.from_bytes(src[pos:pos+t], 'little')
+    def fill():
+        # top up the bit reservoir to >=32 bits, 4 bytes (LE) at a time
+        nonlocal pos, data, count
+        if count > 32 or count < 0:
+            return
+        t = 4 if size - pos >= 4 else size - pos
+        data |= int.from_bytes(src[pos:pos+t], 'little') << count
+        count += t*8
         pos += t
-        return (y << c) | d, c + t*8
 
     def read_lens(n):
         nonlocal data, count, stack
         what = [0]*0x400
         nz = 0
         for y in range(n):
-            data, count = fill(data, count)
+            fill()
             flag = data & 1
             data >>= 1
             count -= 1
             if flag:
-                data, count = fill(data, count)
+                fill()
                 stack = data & 0xF
                 data >>= 4
                 count -= 4
@@ -338,13 +346,13 @@ def edl1_decompress_block(src: bytes, max_out: int = 0x2000) -> bytes:
         return what, nz
 
     while pos <= size:
-        data, count = fill(data, count)
+        fill()
         mode = data & 1
         data >>= 1
         count -= 1
 
         if mode:
-            data, count = fill(data, count)
+            fill()
             n = data & 0x1FF
             data >>= 9
             count -= 9
@@ -353,7 +361,7 @@ def edl1_decompress_block(src: bytes, max_out: int = 0x2000) -> bytes:
                 r = _fill_buffer(large, what, n, nz, 10)
                 if r < 0:
                     raise ValueError('bad Huffman table (literal/length)')
-            data, count = fill(data, count)
+            fill()
             n = data & 0x1FF
             data >>= 9
             count -= 9
@@ -364,13 +372,13 @@ def edl1_decompress_block(src: bytes, max_out: int = 0x2000) -> bytes:
                     raise ValueError('bad Huffman table (distance)')
 
             while True:
-                data, count = fill(data, count)
+                fill()
                 x = large[data & 0x3FF]
                 y = x & 0xF
                 z = (x >> 4) & 7
                 if y == 0:
                     x >>= 7
-                    data, count = fill(data, count)
+                    fill()
                     x += (data >> 10) & ((1 << z) - 1)
                     x = large[x + 0x400]
                     y = x & 0xF
@@ -378,26 +386,27 @@ def edl1_decompress_block(src: bytes, max_out: int = 0x2000) -> bytes:
                 count -= y
                 x >>= 7
                 if x < 0x100:
-                    out.append(x)
-                    if len(out) > max_out:
+                    append(x)
+                    olen += 1
+                    if olen > max_out:
                         return bytes(out)
                 elif x > 0x100:
                     z = TABLE2[x - 0x101]
                     y = 0
                     if z:
-                        data, count = fill(data, count)
+                        fill()
                         y = data & ((1 << z) - 1)
                         data >>= z
                         count -= z
                     num = TABLE1[x - 0x101] + y + 3
 
-                    data, count = fill(data, count)
+                    fill()
                     x = small[data & 0xFF]
                     y = x & 0xF
                     z = (x & 0x70) >> 4
                     if y == 0:
                         x >>= 7
-                        data, count = fill(data, count)
+                        fill()
                         x += (data >> 8) & ((1 << z) - 1)
                         x = small[x + 0x100]
                         y = x & 0xF
@@ -407,30 +416,32 @@ def edl1_decompress_block(src: bytes, max_out: int = 0x2000) -> bytes:
                     z = TABLE4[x]
                     y = 0
                     if z:
-                        data, count = fill(data, count)
+                        fill()
                         y = data & ((1 << z) - 1)
                         data >>= z
                         count -= z
                     back = TABLE3[x] + y + 1
                     for _ in range(num):
-                        p = len(out) - back
-                        out.append(out[p] if p >= 0 else 0)
-                        if len(out) > max_out:
+                        p = olen - back
+                        append(out[p] if p >= 0 else 0)
+                        olen += 1
+                        if olen > max_out:
                             return bytes(out)
                 else:
                     break  # 0x100 = end of symbol segment
         else:
-            data, count = fill(data, count)
+            fill()
             num = data & 0x7FFF
             data >>= 15
             count -= 15
             for _ in range(num):
-                data, count = fill(data, count)
-                out.append(data & 0xFF)
+                fill()
+                append(data & 0xFF)
+                olen += 1
                 data >>= 8
                 count -= 8
 
-        data, count = fill(data, count)
+        fill()
         eof = data & 1
         data >>= 1
         count -= 1
