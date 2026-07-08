@@ -75,6 +75,48 @@ import struct
 import sys
 import zlib
 
+
+class HydroError(Exception):
+    """A user-facing error (bad path, wrong file type, etc). main() prints
+    these as a clean one-line message instead of a Python traceback."""
+
+
+def need_file(path, what):
+    """Return path if it's an existing file, else raise a clear HydroError."""
+    if not os.path.exists(path):
+        raise HydroError(f'{what} not found: {path}')
+    if os.path.isdir(path):
+        raise HydroError(f'{what} should be a file, but {path} is a directory')
+    return path
+
+
+def need_splitdir(path):
+    """Validate that `path` is a world _split directory (from `world`/`all`).
+    Raises a HydroError that points the user at the right command/dir."""
+    if not os.path.exists(path):
+        raise HydroError(
+            f'directory not found: {path}\n'
+            f'  (expected a world _split directory, e.g. '
+            f'out/bc0abcfa.bin_split -- run `hydrotool.py all Hydro.fsd -o '
+            f'out` first if you have not)')
+    if not os.path.isdir(path):
+        raise HydroError(f'{path} is a file; expected a world _split '
+                         f'directory (e.g. out/bc0abcfa.bin_split)')
+    # index.csv is written only by `world`/`all` into the split dir -- it's
+    # the definitive marker (a bare .bin check would false-pass on an
+    # extract dir that just happens to hold the raw bc0abcfa.bin container).
+    if not os.path.isfile(os.path.join(path, 'index.csv')):
+        hint = ''
+        cand = glob.glob(os.path.join(path, '*_split', 'index.csv'))
+        if cand:
+            hint = ('\n  (this looks like an extract dir -- point at '
+                    f'{os.path.dirname(cand[0])} instead)')
+        raise HydroError(
+            f'{path} is not a world _split directory (no index.csv). Run '
+            f'`hydrotool.py all Hydro.fsd -o out` first, then use '
+            f'out/bc0abcfa.bin_split.{hint}')
+    return path
+
 DIR_OFFSET = 0x4
 DIR_SLOTS = 2048
 BLOCK_TABLE_OFFSET = 0x8004
@@ -104,7 +146,7 @@ def read_png(path):
     edited image back in."""
     d = open(path, 'rb').read()
     if d[:8] != b'\x89PNG\r\n\x1a\n':
-        raise ValueError(f'{path}: not a PNG file')
+        raise HydroError(f'{path}: not a PNG file')
     pos = 8
     w = h = bitdepth = colortype = interlace = None
     idat = bytearray()
@@ -124,10 +166,10 @@ def read_png(path):
             trns = body
         pos += 12 + ln
     if interlace:
-        raise ValueError(f'{path}: interlaced PNGs are not supported -- '
+        raise HydroError(f'{path}: interlaced PNGs are not supported -- '
                           f're-export without interlacing')
     if bitdepth != 8:
-        raise ValueError(f'{path}: only 8-bit PNGs are supported '
+        raise HydroError(f'{path}: only 8-bit PNGs are supported '
                           f'(got {bitdepth}-bit)')
     channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[colortype]
     raw = zlib.decompress(bytes(idat))
@@ -453,7 +495,7 @@ class FSDArchive:
         with open(path, 'rb') as f:
             self.data = f.read()
         if self.data[:3] != b'FSD':
-            raise ValueError('not an FSD archive (bad magic)')
+            raise HydroError('not an FSD archive (bad magic)')
         self.version = self.data[3]
         self.entries = []
         for i in range(DIR_SLOTS):
@@ -534,9 +576,14 @@ def egf_to_png(path, out=None):
 
 def cmd_textures(args):
     src = args.dir
+    if not os.path.exists(src):
+        raise HydroError(f'not found: {src} (expected an .egf file or a '
+                         f'directory to search)')
     targets = ([src] if src.endswith('.egf')
                else sorted(glob.glob(os.path.join(src, '**', '*.egf'),
                                      recursive=True)))
+    if not targets:
+        raise HydroError(f'no .egf files found in {src}')
     ok = 0
     for f in targets:
         if egf_to_png(f):
@@ -758,7 +805,13 @@ def cmd_world(args):
     """Split a world container file and decode its textures.
     The world file is the large resource extracted as data/... .bin with the
     'ABCDEFG...' magic (id bc0abcfa)."""
+    need_file(args.worldfile, 'world container')
     data = open(args.worldfile, 'rb').read()
+    if data[:4] != WORLD_MAGIC:
+        raise HydroError(
+            f'{args.worldfile} is not the world container (expected it to '
+            f'start with "ABCD..."). It is the ~104MB bc0abcfa.bin file '
+            f'produced by `extract`/`all`.')
     outdir = args.outdir or args.worldfile + '_split'
     n = world_split(data, outdir)
     ok, skip = world_textures(outdir)
@@ -821,7 +874,7 @@ def encode_texture(orig, rgba, w, h, ext_palette=None):
         info = struct.unpack_from('<I', orig, 4)[0]
         oh, ow = info >> 11, (info & 0x7FF) >> 1
         if (ow, oh) != (w, h):
-            raise ValueError(f'PNG is {w}x{h}, resource needs {ow}x{oh}')
+            raise HydroError(f'PNG is {w}x{h}, resource needs {ow}x{oh}')
         fmt4444 = info & 1
         def pack(x, y):
             r, g, b, a = get(x, y)
@@ -852,9 +905,9 @@ def encode_texture(orig, rgba, w, h, ext_palette=None):
     elif kind == b'B' and len(orig) >= 16:
         fmt, ow, oh = 11, *struct.unpack_from('<2I', orig, 8)
     else:
-        raise ValueError('not a recognized T*/M*/B*/EGF texture record')
+        raise HydroError('not a recognized T*/M*/B*/EGF texture record')
     if (ow, oh) != (w, h):
-        raise ValueError(f'PNG is {w}x{h}, resource needs {ow}x{oh}')
+        raise HydroError(f'PNG is {w}x{h}, resource needs {ow}x{oh}')
 
     def put16(x, y, v, base):
         o = base + ((h-1-y)*w + x)*2       # bottom-up
@@ -910,7 +963,7 @@ def encode_texture(orig, rgba, w, h, ext_palette=None):
                         v = (_q(a,4)<<4)|i4
                     put8(x, y, v, 36)
         else:
-            raise ValueError(f'unsupported T* fmt {fmt}')
+            raise HydroError(f'unsupported T* fmt {fmt}')
         return bytes(out)
 
     if kind == b'M':
@@ -926,7 +979,7 @@ def encode_texture(orig, rgba, w, h, ext_palette=None):
                     i8 = round(0.299*r+0.587*g+0.114*b)
                     v = (a<<8)|i8
                 else:
-                    raise ValueError(f'unsupported M* fmt {fmt}')
+                    raise HydroError(f'unsupported M* fmt {fmt}')
                 put16(x, y, v, 0x28)
         return bytes(out)
 
@@ -941,6 +994,8 @@ def encode_texture(orig, rgba, w, h, ext_palette=None):
 
 
 def cmd_retexture(args):
+    need_file(args.original, 'original texture record')
+    need_file(args.png, 'edited PNG')
     orig = open(args.original, 'rb').read()
     w, h, rgba = read_png(args.png)
     ext_palette = None
@@ -978,6 +1033,7 @@ WORLD_MAGIC = b'ABCD'   # world container starts "ABCDEFGH..."
 
 
 def cmd_extract(args):
+    need_file(args.archive, 'FSD archive')
     fsd = FSDArchive(args.archive)
     names = crack_names({e[0] for e in fsd.entries})
     names.update(load_name_db(args.archive))
@@ -1110,8 +1166,21 @@ def worldpack(container, moddir, outpath):
     return nmod, len(out)
 
 
+def _check_moddir(moddir):
+    if not os.path.isdir(moddir):
+        raise HydroError(f'mods folder not found: {moddir}\n'
+                         f'  (make a folder, put your replacement records in '
+                         f'it -- e.g. from `retexture` or Blender\'s Export '
+                         f'& Add to Mods -- then point at it)')
+
+
 def cmd_worldpack(args):
+    need_file(args.container, 'world container')
+    _check_moddir(args.moddir)
     nmod, size = worldpack(args.container, args.moddir, args.output)
+    if not nmod:
+        print(f'warning: no records in {args.moddir} matched a resource '
+              f'name; output is identical to the input', file=sys.stderr)
     print(f'{nmod} records replaced -> {args.output} ({size} bytes)')
 
 
@@ -1187,12 +1256,17 @@ def fsd_repack(archive, moddir, outpath, names, overrides=None):
 
 
 def cmd_repack(args):
+    need_file(args.archive, 'FSD archive')
+    _check_moddir(args.moddir)
     names = {}
     db = load_name_db(args.archive)
     for h, p in db.items():
         rel = p.split(':', 1)[-1].lstrip(chr(92)).replace(chr(92), os.sep)
         names[h] = rel.lower()
     nmod, size = fsd_repack(args.archive, args.moddir, args.output, names)
+    if not nmod:
+        print(f'warning: no files in {args.moddir} matched an archive entry; '
+              f'output is identical to the input', file=sys.stderr)
     print(f'{nmod} files replaced -> {args.output} ({size} bytes)')
 
 
@@ -1208,6 +1282,8 @@ def cmd_mod(args):
     mods in-memory (worldpack), then applies everything -- the rebuilt
     container plus any other file mods -- in a single repack pass.
     Supersedes running `worldpack` then `repack` by hand."""
+    need_file(args.archive, 'FSD archive')
+    _check_moddir(args.moddir)
     fsd = FSDArchive(args.archive)
     names = {}
     for h, p in load_name_db(args.archive).items():
@@ -1224,6 +1300,12 @@ def cmd_mod(args):
     nmod_top, size = fsd_repack(args.archive, args.moddir, args.output,
                                 names, overrides)
     other = nmod_top - (1 if WORLD_HASH in overrides else 0)
+    if not nmod_world and not other:
+        print(f'warning: nothing in {args.moddir} matched a resource or '
+              f'file name -- output is identical to the input. Replacement '
+              f'records must be named after the resource they replace (e.g. '
+              f'GBBBANSHUH0.bin) or use an extract path (e.g. '
+              f'data/textures/loading.egf).', file=sys.stderr)
     print(f'{nmod_world} world-container record(s) replaced'
           + (' (container rebuilt)' if nmod_world else '')
           + f'; {other} other top-level file(s) replaced'
@@ -1245,7 +1327,7 @@ def cmd_mod(args):
 
 def cmd_anims(args):
     import json
-    src = args.splitdir
+    src = need_splitdir(args.splitdir)
     outdir = args.outdir or os.path.join(src, '_anims')
     os.makedirs(outdir, exist_ok=True)
     n = 0
@@ -1288,7 +1370,7 @@ def cmd_anims(args):
 # spills into the trailer) -- world_split keeps 4 bytes of slack.
 
 def cmd_cameras(args):
-    src = args.splitdir
+    src = need_splitdir(args.splitdir)
     outdir = args.outdir or os.path.join(src, '_cameras')
     os.makedirs(outdir, exist_ok=True)
     n = 0
@@ -1375,6 +1457,10 @@ def esf_to_wav(path, out):
 
 def cmd_sounds(args):
     src = args.extractdir
+    if not os.path.isdir(src):
+        raise HydroError(f'directory not found: {src}\n  (expected an '
+                         f'extract output dir containing sound/ and '
+                         f'wavmusic/ -- run `extract`/`all` first)')
     outdir = args.outdir or os.path.join(src, 'sounds', 'wav')
     n = 0
     for f in sorted(glob.glob(os.path.join(src, '**', '*.esf'),
@@ -1485,7 +1571,7 @@ def h_nodes(d, texrefs):
 
 
 def cmd_tracks(args):
-    src = args.splitdir
+    src = need_splitdir(args.splitdir)
     outdir = args.outdir or os.path.join(src, '_tracks')
     os.makedirs(outdir, exist_ok=True)
     relocs = load_relocs(src)
@@ -1554,6 +1640,7 @@ def parse_params(d):
 
 
 def cmd_params(args):
+    need_splitdir(args.splitdir)
     outdir = args.outdir or os.path.join(args.splitdir, '_params')
     os.makedirs(outdir, exist_ok=True)
     n = 0
@@ -1687,7 +1774,7 @@ def load_relocs(splitdir):
 
 
 def cmd_models(args):
-    src = args.splitdir
+    src = need_splitdir(args.splitdir)
     outdir = args.outdir or os.path.join(src, '_models')
     os.makedirs(outdir, exist_ok=True)
     relocs = load_relocs(src)
@@ -1842,7 +1929,23 @@ def main():
     p.set_defaults(func=cmd_models)
 
     args = ap.parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except HydroError as e:
+        print(f'error: {e}', file=sys.stderr)
+        sys.exit(1)
+    except FileNotFoundError as e:
+        print(f'error: file not found: {e.filename}', file=sys.stderr)
+        sys.exit(1)
+    except (struct.error, IndexError):
+        # a parse blew past the end of a buffer -- almost always the wrong
+        # file handed to a command (e.g. a texture given to `world`)
+        print(f'error: could not parse the input for `{args.cmd}` -- is it '
+              f'the right file/directory for this command? (see '
+              f'`hydrotool.py {args.cmd} -h`)', file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        sys.exit(130)
 
 
 if __name__ == '__main__':
