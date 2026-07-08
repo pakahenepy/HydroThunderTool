@@ -26,8 +26,9 @@ All 459 ESF (425 SFX + 34 music) decode to WAV via `hydrotool.py sounds` (IMA AD
 
 Still open (smaller, well-scoped):
 - **A\*** animations mostly decoded (`hydrotool.py anims` → JSON; the second matrix block per key is uninterpreted). **D\*** camera scripts DECODED (`cameras`).
-- **Blender add-on SHIPPED (2026-07-07)**: `hydro_blender.py` — import G models / H tracks (with placements) / A anims (bones map 1:1 to model sub-parts, verified across 70 pairs); export selection to a game-ready G record + reloc trailer (round-trip: retail duck rebuilds with identical verts/normals/indices; injected a resized duck via worldpack successfully). bpy UI untested in this environment — verify axis convention + anim key order in Blender on first use.
-- **Repacker SHIPPED (2026-07-07)**: `worldpack` + `repack` rebuild both containers (byte-identical round-trip; end-to-end mod verified). Modding is live.
+- **Blender add-on SHIPPED (2026-07-07/08)**: `hydro_blender.py` — import G models / H tracks (with placements) / A anims (bones map 1:1 to model sub-parts, verified across 70 pairs; anim playback fixed: bone-major keys, column-major matrices, quaternion baking with sign continuity to kill Euler-flip jank, and hidden track-prop sources are eye-hidden not excluded so they still animate during playback). "Export & Add to Mods" auto-detects the resource name and world `_split` dir (tagged on import) and writes straight into `<splitdir>/_mods/` — no filename to type.
+- **Repacker SHIPPED, now a single command (2026-07-08)**: `hydrotool.py mod <Hydro.fsd> <modsdir> -o new.fsd` replaces the old worldpack-then-repack two-step — one mods folder, one command, handles both world-record and top-level file mods together. `worldpack`/`repack` still exist as lower-level building blocks `mod` calls internally.
+- **Texture repacking SHIPPED (2026-07-08)**: `hydrotool.py retexture <original> <edited.png>` re-encodes an edited PNG back into any T*/M*/B*/EGF format (including the P_8 palette format via nearest-color match, and EGF re-tiling). Verified byte-identical round-trip on one file of every texture format in the retail data; verified end-to-end with a real pixel edit surviving `retexture` → `mod` → re-extract → re-decode.
 - Glide capture remains unnecessary.
 
 ## Recommended path forward: Glide capture (deterministic)

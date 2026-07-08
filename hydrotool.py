@@ -19,22 +19,44 @@ Works straight from Hydro.fsd. Subcommands:
   all       everything in one shot: extract, textures, world split (with
             _textures/ and _screens/), models, tracks, params, and sounds.
 
+  Modding (see the "Modding" example below for the full workflow):
+  retexture Re-encode an edited PNG back into a T*/M*/B*/EGF texture record.
+  mod       ONE-SHOT repack: rebuild Hydro.fsd straight from a mods folder
+            containing world-record and/or top-level file replacements.
+  worldpack Rebuild just the world container from world-record mods
+            (lower-level; `mod` calls this internally -- use `mod` instead
+            unless you specifically need an intermediate container file).
+  repack    Rebuild Hydro.fsd from top-level file mods only (lower-level;
+            `mod` calls this internally -- use `mod` instead unless you're
+            not touching anything inside the world container).
+
 Every command takes -o/--outdir to choose the output directory. Defaults:
   extract/all -> <archive>_out/         world  -> <worldfile>_split/
   models      -> <splitdir>/_models/    params -> <splitdir>/_params/
   sounds      -> <extractdir>/sounds/wav/
+  retexture   -> <original-folder>/_mods/<same-name>
   textures decodes in place, next to each .egf.
 
 Examples (a full run from scratch):
   python3 hydrotool.py all Hydro.fsd -o out
-  python3 hydrotool.py models out/bc0abcfa.bin_split
-  python3 hydrotool.py params out/bc0abcfa.bin_split
+
+Example (modding -- edit a boat texture and a model, then play it):
+  # 1. edit out/bc0abcfa.bin_split/_textures/TBBBANS_A10.png in any editor
+  #    (keep the same pixel dimensions), then re-encode it back:
+  python3 hydrotool.py retexture out/bc0abcfa.bin_split/TBBBANS_A10.bin \\
+      out/bc0abcfa.bin_split/_textures/TBBBANS_A10.png
+  # -> out/bc0abcfa.bin_split/_mods/TBBBANS_A10.bin
+  #
+  # 2. (optional) export an edited mesh from Blender's Hydro Thunder addon
+  #    into the SAME _mods/ folder (GBBBANSHUH0.bin + .trailer.bin)
+  #
+  # 3. one command rebuilds the whole FSD with every mod in _mods/ applied:
+  python3 hydrotool.py mod Hydro.fsd out/bc0abcfa.bin_split/_mods -o Hydro_modded.fsd
 
 Notes:
   * EGFs wider than 256 (the 640x480 loading screen) are stored as 256x256
-    tiles and are de-tiled automatically.
+    tiles and are de-tiled/re-tiled automatically.
   * ERM files are per-track radar maps, not 3D models.
-  * M* world records (terrain heightfield patches) are not decoded yet.
   * Format documentation lives in FSD_format.md alongside this script.
 """
 
@@ -68,6 +90,79 @@ def write_png(path, w, h, rgba):
         f.write(b'\x89PNG\r\n\x1a\n'
                 + ck(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0))
                 + ck(b'IDAT', zlib.compress(raw, 9)) + ck(b'IEND', b''))
+
+
+def read_png(path):
+    """Read a PNG (8-bit depth, non-interlaced; color types 0/2/3/4/6) into
+    (w, h, rgba bytearray), no dependencies. Used by retexture() to load an
+    edited image back in."""
+    d = open(path, 'rb').read()
+    if d[:8] != b'\x89PNG\r\n\x1a\n':
+        raise ValueError(f'{path}: not a PNG file')
+    pos = 8
+    w = h = bitdepth = colortype = interlace = None
+    idat = bytearray()
+    palette = None
+    trns = None
+    while pos < len(d):
+        ln, typ = struct.unpack_from('>I4s', d, pos)
+        body = d[pos+8:pos+8+ln]
+        if typ == b'IHDR':
+            w, h, bitdepth, colortype, comp, filt, interlace = \
+                struct.unpack('>IIBBBBB', body)
+        elif typ == b'IDAT':
+            idat += body
+        elif typ == b'PLTE':
+            palette = [tuple(body[i:i+3]) for i in range(0, len(body), 3)]
+        elif typ == b'tRNS':
+            trns = body
+        pos += 12 + ln
+    if interlace:
+        raise ValueError(f'{path}: interlaced PNGs are not supported -- '
+                          f're-export without interlacing')
+    if bitdepth != 8:
+        raise ValueError(f'{path}: only 8-bit PNGs are supported '
+                          f'(got {bitdepth}-bit)')
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[colortype]
+    raw = zlib.decompress(bytes(idat))
+    stride = w * channels
+    out = bytearray(stride * h)
+    prev = bytearray(stride)
+    pos = 0
+    for y in range(h):
+        f = raw[pos]; pos += 1
+        line = bytearray(raw[pos:pos+stride]); pos += stride
+        for i in range(stride):
+            a = line[i-channels] if i >= channels else 0
+            b = prev[i]
+            c = prev[i-channels] if i >= channels else 0
+            if f == 1: line[i] = (line[i] + a) & 255
+            elif f == 2: line[i] = (line[i] + b) & 255
+            elif f == 3: line[i] = (line[i] + (a+b)//2) & 255
+            elif f == 4:
+                p = a+b-c; pa,pb,pc = abs(p-a),abs(p-b),abs(p-c)
+                pr = a if pa<=pb and pa<=pc else (b if pb<=pc else c)
+                line[i] = (line[i] + pr) & 255
+        out[y*stride:(y+1)*stride] = line
+        prev = line
+    rgba = bytearray(w*h*4)
+    for i in range(w*h):
+        so = i*channels
+        if colortype == 6:
+            rgba[i*4:i*4+4] = out[so:so+4]
+        elif colortype == 2:
+            rgba[i*4:i*4+3] = out[so:so+3]; rgba[i*4+3] = 255
+        elif colortype == 0:
+            g = out[so]; rgba[i*4:i*4+4] = bytes((g, g, g, 255))
+        elif colortype == 4:
+            g, a = out[so], out[so+1]
+            rgba[i*4:i*4+4] = bytes((g, g, g, a))
+        else:  # 3: palette
+            idx = out[so]
+            r, g, b = palette[idx] if palette else (idx, idx, idx)
+            a = trns[idx] if trns and idx < len(trns) else 255
+            rgba[i*4:i*4+4] = bytes((r, g, b, a))
+    return w, h, rgba
 
 
 TABLE1 = [0,1,2,3,4,5,6,7,8,0xA,0xC,0xE,0x10,0x14,0x18,0x1C,0x20,0x28,0x30,0x38,
@@ -667,6 +762,206 @@ def cmd_world(args):
           f'{skip} skipped, {scr} loading screens)')
 
 
+# ===========================================================================
+# texture re-encoding (PNG -> game format, for modding)
+# ===========================================================================
+#
+# Inverts world_textures/world_mtextures/world_screens/egf_to_png: takes an
+# edited PNG (same width/height as the decoded original -- dimensions can't
+# change) and packs it back into the exact on-disk format, preserving the
+# header (fmt/w/h) untouched so the output is always the same size as the
+# input record. T*/M*/B* are stored bottom-up; EGF is stored top-down (and
+# re-tiled into 256x256 blocks if wider than 256, mirroring egf_to_png).
+
+def _q(v, bits):
+    """Quantize an 8-bit channel down to `bits` bits, scaled back to the
+    0..(2**bits - 1) integer range (matches the *17/*255 factors used when
+    decoding, so re-encoding round-trips exactly for already-quantized
+    colors)."""
+    return round(v * ((1 << bits) - 1) / 255)
+
+
+def _nearest_palette_index(rgba, palette, cache, use_alpha=True):
+    key = (rgba, use_alpha)
+    if key in cache:
+        return cache[key]
+    best, bestd = 0, None
+    for i, (r, g, b, a) in enumerate(palette):
+        dr, dg, db = rgba[0]-r, rgba[1]-g, rgba[2]-b
+        dist = dr*dr + dg*dg + db*db
+        if use_alpha:
+            da = rgba[3]-a
+            dist += da*da
+        if bestd is None or dist < bestd:
+            best, bestd = i, dist
+            if dist == 0:
+                break
+    cache[key] = best
+    return best
+
+
+def encode_texture(orig, rgba, w, h, ext_palette=None):
+    """Re-encode an RGBA image (top-down, w*h*4 bytes) into the same T*/M*/
+    B*/EGF record format as `orig` (its original bytes). Returns new bytes,
+    always the same length as `orig`. Raises ValueError on unsupported/
+    mismatched input. `ext_palette` supplies a 256-entry [(r,g,b,a),...]
+    palette for fmt-14 (AP_88) records, which reference a paired T* file's
+    palette rather than carrying their own."""
+    def get(x, y):                     # top-down PNG row order
+        o = (y*w + x) * 4
+        return (rgba[o], rgba[o+1], rgba[o+2], rgba[o+3])
+
+    if orig[:4] == b'EGF\x04':
+        info = struct.unpack_from('<I', orig, 4)[0]
+        oh, ow = info >> 11, (info & 0x7FF) >> 1
+        if (ow, oh) != (w, h):
+            raise ValueError(f'PNG is {w}x{h}, resource needs {ow}x{oh}')
+        fmt4444 = info & 1
+        def pack(x, y):
+            r, g, b, a = get(x, y)
+            if fmt4444:
+                return (_q(a,4)<<12)|(_q(r,4)<<8)|(_q(g,4)<<4)|_q(b,4)
+            return ((1 if a >= 128 else 0)<<15)|(_q(r,5)<<10)|(_q(g,5)<<5)|_q(b,5)
+        px = array.array('H', bytes(w*h*2))
+        if w > 256:
+            pos = 0
+            for ty in range(0, h, 256):
+                th = min(256, h-ty)
+                for tx in range(0, w, 256):
+                    tw = min(256, w-tx)
+                    for y in range(th):
+                        for x in range(tw):
+                            px[pos] = pack(tx+x, ty+y); pos += 1
+        else:
+            for y in range(h):
+                for x in range(w):
+                    px[y*w+x] = pack(x, y)
+        return bytes(orig[:8]) + px.tobytes()
+
+    kind = orig[3:4]
+    if kind == b'T' and len(orig) >= 36:
+        fmt, ow, oh = struct.unpack_from('<3I', orig, 16)
+    elif kind == b'M' and len(orig) >= 0x28:
+        fmt, ow, oh = struct.unpack_from('<3I', orig, 0x10)
+    elif kind == b'B' and len(orig) >= 16:
+        fmt, ow, oh = 11, *struct.unpack_from('<2I', orig, 8)
+    else:
+        raise ValueError('not a recognized T*/M*/B*/EGF texture record')
+    if (ow, oh) != (w, h):
+        raise ValueError(f'PNG is {w}x{h}, resource needs {ow}x{oh}')
+
+    def put16(x, y, v, base):
+        o = base + ((h-1-y)*w + x)*2       # bottom-up
+        struct.pack_into('<H', out, o, v)
+    def put8(x, y, v, base):
+        out[base + (h-1-y)*w + x] = v
+
+    if kind == b'T':
+        out = bytearray(orig)
+        if fmt == 5:
+            palette = _read_palette(orig)
+            cache = {}
+            idx_base = 36 + 1024
+            for y in range(h):
+                for x in range(w):
+                    out[idx_base + (h-1-y)*w + x] = \
+                        _nearest_palette_index(get(x, y), palette, cache)
+        elif fmt in (8, 11, 12, 13, 14):
+            pcache = {}
+            for y in range(h):
+                for x in range(w):
+                    r, g, b, a = get(x, y)
+                    if fmt == 11:
+                        v = ((1 if a>=128 else 0)<<15)|(_q(r,5)<<10)|(_q(g,5)<<5)|_q(b,5)
+                    elif fmt == 12:
+                        v = (_q(a,4)<<12)|(_q(r,4)<<8)|(_q(g,4)<<4)|_q(b,4)
+                    elif fmt == 13:
+                        i8 = round(0.299*r+0.587*g+0.114*b)
+                        v = (a<<8)|i8
+                    elif fmt == 14:
+                        if ext_palette:
+                            idx = _nearest_palette_index(
+                                (r, g, b, 0), ext_palette, pcache,
+                                use_alpha=False)
+                        else:
+                            idx = round(0.299*r+0.587*g+0.114*b)
+                        v = (a<<8)|idx
+                    else:               # 8: ARGB_8332
+                        v = (a<<8)|(_q(r,3)<<5)|(_q(g,3)<<2)|_q(b,2)
+                    put16(x, y, v, 36)
+        elif fmt in (0, 2, 3, 4):
+            for y in range(h):
+                for x in range(w):
+                    r, g, b, a = get(x, y)
+                    if fmt == 0:
+                        v = (_q(r,3)<<5)|(_q(g,3)<<2)|_q(b,2)
+                    elif fmt == 2:      # ALPHA_8: value lives in alpha
+                        v = a
+                    elif fmt == 3:      # INTENSITY_8: luma
+                        v = round(0.299*r+0.587*g+0.114*b)
+                    else:               # ALPHA_INTENSITY_44
+                        i4 = _q(round(0.299*r+0.587*g+0.114*b), 4)
+                        v = (_q(a,4)<<4)|i4
+                    put8(x, y, v, 36)
+        else:
+            raise ValueError(f'unsupported T* fmt {fmt}')
+        return bytes(out)
+
+    if kind == b'M':
+        out = bytearray(orig)
+        for y in range(h):
+            for x in range(w):
+                r, g, b, a = get(x, y)
+                if fmt == 11:
+                    v = ((1 if a>=128 else 0)<<15)|(_q(r,5)<<10)|(_q(g,5)<<5)|_q(b,5)
+                elif fmt == 12:
+                    v = (_q(a,4)<<12)|(_q(r,4)<<8)|(_q(g,4)<<4)|_q(b,4)
+                elif fmt == 13:
+                    i8 = round(0.299*r+0.587*g+0.114*b)
+                    v = (a<<8)|i8
+                else:
+                    raise ValueError(f'unsupported M* fmt {fmt}')
+                put16(x, y, v, 0x28)
+        return bytes(out)
+
+    # B* loading screen: always ARGB1555, no alpha channel in-file
+    out = bytearray(orig)
+    for y in range(h):
+        for x in range(w):
+            r, g, b, _ = get(x, y)
+            v = (1<<15)|(_q(r,5)<<10)|(_q(g,5)<<5)|_q(b,5)
+            put16(x, y, v, 16)
+    return bytes(out)
+
+
+def cmd_retexture(args):
+    orig = open(args.original, 'rb').read()
+    w, h, rgba = read_png(args.png)
+    ext_palette = None
+    fmt = None
+    if orig[3:4] == b'T' and len(orig) >= 36:
+        fmt = struct.unpack_from('<I', orig, 16)[0]
+    if fmt == 14:
+        prefix = os.path.basename(args.original)[:6]
+        for f in glob.glob(os.path.join(os.path.dirname(args.original) or
+                                        '.', 'T*.bin')):
+            if os.path.basename(f)[:6] == prefix:
+                d = open(f, 'rb').read()
+                if len(d) >= 36+1024 and struct.unpack_from('<I', d, 16)[0] == 5:
+                    ext_palette = _read_palette(d)
+                    break
+    new_bytes = encode_texture(orig, rgba, w, h, ext_palette)
+    outpath = args.output
+    if not outpath:
+        outdir = os.path.join(os.path.dirname(args.original) or '.', '_mods')
+        os.makedirs(outdir, exist_ok=True)
+        outpath = os.path.join(outdir, os.path.basename(args.original))
+    elif os.path.isdir(outpath):
+        outpath = os.path.join(outpath, os.path.basename(args.original))
+    with open(outpath, 'wb') as f:
+        f.write(new_bytes)
+    print(f'{args.png} ({w}x{h}) -> {outpath} ({len(new_bytes)} bytes)')
+
 
 # ===========================================================================
 # extract everything from the FSD
@@ -748,12 +1043,13 @@ def cmd_all(args):
 # repacking (modding support)
 # ===========================================================================
 
-def worldpack(container, moddir, outpath):
-    """Rebuild the world container, replacing any record whose <NAME>.bin
-    exists in moddir. Record payloads may change size; each record's
-    relocation trailer is preserved verbatim, and the record table is
-    rewritten. Byte-identical to the input when moddir is empty."""
-    data = open(container, 'rb').read()
+def worldpack_bytes(data, moddir):
+    """Rebuild the world container in memory, replacing any record whose
+    <NAME>.bin exists in moddir. Record payloads may change size; each
+    record's relocation trailer is preserved verbatim (or replaced from a
+    <NAME>.trailer.bin if present), and the record table is rewritten.
+    Byte-identical to the input when moddir is empty. Returns (nmod,
+    new_bytes)."""
     table = struct.unpack_from('<I', data, 0x20)[0]
     payload_base = struct.unpack_from('<I', data, 0x24)[0]
     count = struct.unpack_from('<I', data, 0x2c)[0]
@@ -796,6 +1092,13 @@ def worldpack(container, moddir, outpath):
         out += payload + trailer
         pos += len(payload) + len(trailer)
     out[:len(hdr)] = hdr
+    return nmod, bytes(out)
+
+
+def worldpack(container, moddir, outpath):
+    """File-based wrapper around worldpack_bytes(). Returns (nmod, size)."""
+    data = open(container, 'rb').read()
+    nmod, out = worldpack_bytes(data, moddir)
     with open(outpath, 'wb') as f:
         f.write(out)
     return nmod, len(out)
@@ -806,11 +1109,15 @@ def cmd_worldpack(args):
     print(f'{nmod} records replaced -> {args.output} ({size} bytes)')
 
 
-def fsd_repack(archive, moddir, outpath, names):
+def fsd_repack(archive, moddir, outpath, names, overrides=None):
     """Rebuild an FSD archive. Files in moddir (matched by their extract
     path, e.g. data/textures/loading.egf or <hash>.bin) replace originals
-    and are stored raw. Unmodified files are copied verbatim (compressed
-    blocks included). Byte-identical when moddir is empty."""
+    and are stored raw. `overrides` (optional {hash: bytes}) takes
+    priority over moddir and is used by cmd_mod to splice in a rebuilt
+    world container without touching disk. Unmodified files are copied
+    verbatim (compressed blocks included). Byte-identical when moddir is
+    empty and overrides is empty."""
+    overrides = overrides or {}
     data = open(archive, 'rb').read()
     dirbytes = bytearray(data[:BLOCK_TABLE_OFFSET])
     blktab = list(struct.unpack_from('<%dI' % BLOCK_TABLE_SLOTS, data,
@@ -828,6 +1135,14 @@ def fsd_repack(archive, moddir, outpath, names):
     nmod = 0
     for e in sorted(entries, key=lambda e: e[2]):
         i, h, off, size, blk = e
+        if h in overrides:
+            buf = overrides[h]
+            struct.pack_into('<4I', dirbytes, DIR_OFFSET + i*16,
+                             h, pos, len(buf), 0)
+            out += buf
+            pos += len(buf)
+            nmod += 1
+            continue
         rel = names.get(h)
         rep = None
         for cand in ([os.path.join(moddir, rel)] if rel else []) + [
@@ -873,6 +1188,40 @@ def cmd_repack(args):
         names[h] = rel.lower()
     nmod, size = fsd_repack(args.archive, args.moddir, args.output, names)
     print(f'{nmod} files replaced -> {args.output} ({size} bytes)')
+
+
+WORLD_HASH = 0xbc0abcfa   # the world container's own id (it has no name)
+
+
+def cmd_mod(args):
+    """One-shot repack: a single mods folder can hold BOTH world-container
+    resource replacements (11-char names like GBBBANSHUH0.bin, with an
+    optional .trailer.bin) and top-level FSD file replacements (extract
+    paths like data/textures/loading.egf, or <hash>.bin) side by side.
+    This finds/decompresses the world container, applies any world-record
+    mods in-memory (worldpack), then applies everything -- the rebuilt
+    container plus any other file mods -- in a single repack pass.
+    Supersedes running `worldpack` then `repack` by hand."""
+    fsd = FSDArchive(args.archive)
+    names = {}
+    for h, p in load_name_db(args.archive).items():
+        rel = p.split(':', 1)[-1].lstrip(chr(92)).replace(chr(92), os.sep)
+        names[h] = rel.lower()
+    overrides = {}
+    nmod_world = 0
+    world_entry = next((e for e in fsd.entries if e[0] == WORLD_HASH), None)
+    if world_entry:
+        world_bytes = fsd.read_file(world_entry)
+        nmod_world, new_world = worldpack_bytes(world_bytes, args.moddir)
+        if nmod_world:
+            overrides[WORLD_HASH] = new_world
+    nmod_top, size = fsd_repack(args.archive, args.moddir, args.output,
+                                names, overrides)
+    other = nmod_top - (1 if WORLD_HASH in overrides else 0)
+    print(f'{nmod_world} world-container record(s) replaced'
+          + (' (container rebuilt)' if nmod_world else '')
+          + f'; {other} other top-level file(s) replaced'
+          + f' -> {args.output} ({size} bytes)')
 
 
 # ===========================================================================
@@ -1399,6 +1748,28 @@ def main():
     p.add_argument('moddir', help='directory of replacement files (extract layout)')
     p.add_argument('-o', '--output', required=True, help='output .fsd')
     p.set_defaults(func=cmd_repack)
+
+    p = sub.add_parser('mod', help='ONE-SHOT repack (recommended): rebuild '
+                       'Hydro.fsd straight from a mods folder containing '
+                       'both world-record mods (GBBBANSHUH0.bin, ...) and '
+                       'top-level file mods (data/textures/loading.egf, '
+                       '...) side by side -- no manual worldpack+repack '
+                       'two-step needed')
+    p.add_argument('archive', help='original Hydro.fsd')
+    p.add_argument('moddir', help='mods folder (world-record .bin/.trailer.bin '
+                   'files and/or top-level extract-path files, mixed)')
+    p.add_argument('-o', '--output', required=True, help='output .fsd')
+    p.set_defaults(func=cmd_mod)
+
+    p = sub.add_parser('retexture', help='re-encode an edited PNG back into '
+                       'a T*/M*/B*/EGF texture record, ready for `mod`')
+    p.add_argument('original', help='the original texture .bin (from a world '
+                   '_split dir) or .egf file being replaced')
+    p.add_argument('png', help='edited PNG, same width/height as the decoded '
+                   'original (dimensions cannot change)')
+    p.add_argument('-o', '--output', help='output file or directory '
+                   '(default: <original-folder>/_mods/<same-name>)')
+    p.set_defaults(func=cmd_retexture)
 
     p = sub.add_parser('anims', help='dump A* prop keyframe animations to JSON')
     p.add_argument('splitdir', help='a world _split directory')

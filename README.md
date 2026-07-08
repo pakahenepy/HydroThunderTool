@@ -20,12 +20,30 @@ asset archive.
   buoyancy, handling for all 13 boats)
 - **Audio** - all 459 ESF sounds + music -> 16-bit WAV (IMA ADPCM)
 - **Animations & cameras** - A* keyframes -> JSON, D* demo camera scripts -> text
-- **Modding** - `worldpack` + `repack` rebuild the containers with your
-  changes (byte-identical round-trip when unmodified)
+- **Modding** - one command, `hydrotool.py mod`, rebuilds `Hydro.fsd` from a
+  single mods folder containing any mix of edited textures, models, and
+  other files (byte-identical round-trip when the folder is empty).
+  `hydrotool.py retexture` re-encodes an edited PNG back into a T*/M*/B*/EGF
+  texture record for that folder.
 - **Blender add-on** - [hydro_blender.py](hydro_blender.py): import models
   (textured, per-sub-part), whole tracks (world mesh + every prop placed),
-  and animations (keyframed sub-parts); export meshes back to game-ready
-  G records for `worldpack`
+  and animations (keyframed sub-parts); **Export & Add to Mods** writes an
+  edited model straight into the mods folder with no filename to type
+
+## Modding quick start
+
+```
+# 1. edit a texture PNG (in _textures/), then re-encode it:
+python hydrotool.py retexture out/bc0abcfa.bin_split/TBBBANS_A10.bin \
+    out/bc0abcfa.bin_split/_textures/TBBBANS_A10.png
+# -> out/bc0abcfa.bin_split/_mods/TBBBANS_A10.bin
+
+# 2. (optional) edit a model in Blender, click "Export & Add to Mods"
+#    -> writes into the SAME _mods/ folder automatically
+
+# 3. one command rebuilds the whole game with everything in _mods/ applied:
+python hydrotool.py mod Hydro.fsd out/bc0abcfa.bin_split/_mods -o Hydro_modded.fsd
+```
 
 ## Usage
 

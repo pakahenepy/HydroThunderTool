@@ -1,6 +1,6 @@
 # Hydro Thunder (PC) `Hydro.fsd` format
 
-Everything below verified against the retail file (67,234,920 bytes). All integers little-endian. TODO update this
+Everything below verified against the retail file (67,234,920 bytes). All integers little-endian.
 
 ## Container
 
@@ -183,7 +183,9 @@ Not palettes. Format: u24 size + `'P'`, u32 1, u32 param_count, then params back
 
 Both containers rebuild **byte-identically** from parsed structures when nothing is modified (verified by SHA-256), so the writers are provably faithful:
 
-- `hydrotool.py worldpack <bc0abcfa.bin> <moddir> -o new.bin` — replaces any world record whose `<NAME>.bin` exists in moddir (records may change size; relocation trailers are preserved; the record table is rewritten).
-- `hydrotool.py repack <Hydro.fsd> <moddir> -o new.fsd` — replaces any FSD file matched by extract path (`data/textures/loading.egf`, `sound/5.esf`, `bc0abcfa.bin`, or `<hash>.bin`); replacements are stored uncompressed (the format allows raw storage — no EDL compressor needed).
+- `hydrotool.py mod <Hydro.fsd> <moddir> -o new.fsd` — **the recommended one-shot command.** A single mods folder can hold *both* world-container resource replacements (11-char names like `GBBBANSHUH0.bin`, with an optional `.trailer.bin`) and top-level FSD file replacements (extract paths like `data/textures/loading.egf`, or `<hash>.bin`) side by side. Internally: finds the world container by its own id (`bc0abcfa`, since it has no name), decompresses it, applies any world-record mods in memory, then does one repack pass with the rebuilt container spliced straight in — no intermediate files, no manual two-step.
+- `hydrotool.py retexture <original.bin_or_egf> <edited.png> [-o out]` — re-encodes an edited PNG back into the exact original T*/M*/B*/EGF binary layout (same header, same size; only pixel dimensions must match — the image can't be resized). Handles every texture format: 1555/4444/332/8332/88/44, the P_8 palette format (nearest-color match against the *existing* palette; the palette itself isn't regenerated), and re-tiles EGFs wider than 256 back into 256×256 blocks. Defaults to writing `<original-folder>/_mods/<same-name>` so the output lands exactly where `mod` expects it. Verified byte-identical round-trip (decode → re-encode with no edits) on every texture format present in the retail data.
+- `hydrotool.py worldpack <bc0abcfa.bin> <moddir> -o new.bin` — lower-level: just rebuilds the world container (records may change size; relocation trailers are preserved; the record table is rewritten). `mod` calls this internally; use it directly only if you specifically need an intermediate container file.
+- `hydrotool.py repack <Hydro.fsd> <moddir> -o new.fsd` — lower-level: just rebuilds the FSD from top-level file mods, stored uncompressed (the format allows raw storage — no EDL compressor needed). `mod` calls this internally too.
 
-Verified end-to-end: doubling the Banshee's `MASS` in `PBBBANSHUP0`, worldpack → repack → re-extract reproduces the change with all 4,588 records intact. Typical mod loop: edit a split record `.bin` (physics floats, texture pixels, placement nodes at documented offsets) → `worldpack` → `repack` → run the game.
+Verified end-to-end: (1) doubling the Banshee's `MASS` in `PBBBANSHUP0`; (2) retexturing a boat skin (painted a marker square, confirmed present at the exact pixel after `mod` → re-extract → re-decode, rest of the image untouched); (3) a model edit (rescaled a mesh) and a texture edit together in the *same* mods folder, applied in one `mod` call — both changes verified intact after re-extraction. Typical mod loop: edit a texture PNG → `retexture` into the mods folder; edit a model in Blender → Export & Add to Mods into the same folder; `hydrotool.py mod Hydro.fsd <mods folder> -o new.fsd` → run the game.

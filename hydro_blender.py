@@ -15,10 +15,21 @@
 #                   rigid hierarchy animation). Actions are stored in
 #                   bpy.data.actions with use_fake_user=True and picked
 #                   from Play Animation... in the panel.
-#   Export Model  - selected mesh objects -> a game-ready G record
-#                   (<NAME>.bin + <NAME>.trailer.bin) for `hydrotool.py
-#                   worldpack`. Materials named after a texture resource
-#                   (e.g. MNTTORC_112) become texture bindings.
+#   Export & Add   - the normal way to save an edited model: select any
+#   to Mods           part (or the root) of a model that was imported by
+#                      this addon and click it. It auto-detects the
+#                      resource name and the world _split directory (no
+#                      filename to type) and writes
+#                      <splitdir>/_mods/<NAME>.bin + .trailer.bin.
+#                      Materials named after a texture resource (e.g.
+#                      MNTTORC_112) become texture bindings. That _mods
+#                      folder is exactly what `hydrotool.py mod` expects --
+#                      run `hydrotool.py retexture` for any edited PNGs
+#                      into the SAME folder, then one `hydrotool.py mod
+#                      Hydro.fsd <splitdir>/_mods -o Hydro_modded.fsd`
+#                      rebuilds the whole game with every change applied.
+#   Export Model   - advanced/manual variant: pick your own output path.
+#   (advanced)       Only needed for objects not imported by this addon.
 #
 # Format docs: FSD_format.md in the HydroThunderTool repo.
 
@@ -415,11 +426,13 @@ if IN_BLENDER:
         coll = coll or bpy.context.scene.collection
         root = bpy.data.objects.new(name, None)
         root.matrix_world = CONV
+        root['hydro_splitdir'] = splitdir      # for Export & Add to Mods
         coll.objects.link(root)
         for i, surfaces in enumerate(g['subparts']):
             ob = _mesh_from('%s.part%d' % (name, i), g, surfaces,
                             splitdir, texrefs, coll)
             ob.parent = root
+            ob['hydro_splitdir'] = splitdir
         if with_anims:
             for ap in find_anims(splitdir, name):
                 try:
@@ -816,12 +829,66 @@ if IN_BLENDER:
 
     class HYDRO_OT_export_model(bpy.types.Operator, ExportHelper):
         bl_idname = 'hydro.export_model'
-        bl_label = 'Export selection as Hydro G record'
+        bl_label = 'Export selection as Hydro G record (advanced)'
+        bl_description = ('Export the selected mesh objects as a single G '
+                          'record at a path you choose. Use "Export & Add '
+                          'to Mods" instead for the normal workflow.')
         filename_ext = '.bin'
         def execute(self, context):
             nv, nt = export_model(context.selected_objects, self.filepath)
             self.report({'INFO'}, 'wrote %d verts / %d tris (+.trailer.bin)'
                         % (nv, nt))
+            return {'FINISHED'}
+
+    def _find_splitdir(ob):
+        cur = ob
+        while cur:
+            if 'hydro_splitdir' in cur:
+                return cur['hydro_splitdir']
+            cur = cur.parent
+        return None
+
+    class HYDRO_OT_export_to_mods(bpy.types.Operator):
+        bl_idname = 'hydro.export_to_mods'
+        bl_label = 'Export & Add to Mods'
+        bl_description = (
+            'Select any part (or the root) of an imported model and click '
+            'this: it figures out the resource name and the world '
+            '_split directory automatically, and writes '
+            '<splitdir>/_mods/<NAME>.bin + .trailer.bin -- ready to feed '
+            'straight into `hydrotool.py mod`. No filename to type, no '
+            'folder to remember.')
+        def execute(self, context):
+            ob = context.active_object
+            if not ob:
+                self.report({'ERROR'}, 'select a model (or one of its '
+                            'parts) first')
+                return {'CANCELLED'}
+            splitdir = _find_splitdir(ob)
+            if not splitdir:
+                self.report({'ERROR'}, '%s was not imported by this addon '
+                            '(no world _split directory on record) -- use '
+                            '"Export Model (advanced)" and pick a path '
+                            'manually' % ob.name)
+                return {'CANCELLED'}
+            name = ob.name.split('.')[0]
+            root = ob
+            while root.parent and 'hydro_splitdir' in root.parent:
+                root = root.parent
+            objs = [c for c in root.children if c.type == 'MESH'] \
+                if root.type != 'MESH' else [root]
+            if not objs:
+                objs = [ob] if ob.type == 'MESH' else []
+            if not objs:
+                self.report({'ERROR'}, 'no mesh geometry found under %s'
+                            % root.name)
+                return {'CANCELLED'}
+            outdir = os.path.join(splitdir, '_mods')
+            os.makedirs(outdir, exist_ok=True)
+            outpath = os.path.join(outdir, name + '.bin')
+            nv, nt = export_model(objs, outpath)
+            self.report({'INFO'}, '%s: %d verts / %d tris -> %s'
+                        % (name, nv, nt, outpath))
             return {'FINISHED'}
 
     class HYDRO_PT_panel(bpy.types.Panel):
@@ -840,12 +907,13 @@ if IN_BLENDER:
             row.operator('hydro.play_all', text='Animate Everything')
             row.operator('hydro.stop_all', text='', icon='PAUSE')
             c.separator()
-            c.operator('hydro.export_model', text='Export Model (G)')
+            c.operator('hydro.export_to_mods', text='Export & Add to Mods')
+            c.operator('hydro.export_model', text='Export Model (advanced)...')
 
     CLASSES = (HYDRO_OT_import_model, HYDRO_OT_import_track,
                HYDRO_OT_import_anim, HYDRO_OT_set_anim,
                HYDRO_OT_play_all, HYDRO_OT_stop_all,
-               HYDRO_OT_export_model, HYDRO_PT_panel)
+               HYDRO_OT_export_to_mods, HYDRO_OT_export_model, HYDRO_PT_panel)
 
     def register():
         for cls in CLASSES:
